@@ -1,7 +1,6 @@
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import List
 
 from app.database import Base
 from sqlalchemy import String, DateTime, func, Numeric, ForeignKey
@@ -31,7 +30,7 @@ class Order(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-    items: Mapped[List["OrderItem"]] = relationship(
+    items: Mapped[list["OrderItem"]] = relationship(
         "OrderItem", back_populates="order", cascade="all, delete-orphan"
     )
 
