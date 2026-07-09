@@ -1,7 +1,7 @@
 import uuid
 
 from app.api.schemas import OrderCreate
-from app.core.interfaces import AbstractUnitOfWork
+from app.interfaces import AbstractUnitOfWork
 
 
 class OrderService:

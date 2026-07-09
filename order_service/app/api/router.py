@@ -1,10 +1,9 @@
 import uuid
 
+from app.api.deps import get_order_service
+from app.api.schemas import OrderRead, OrderCreate
+from app.services.order import OrderService
 from fastapi import APIRouter, status, Depends
-
-from api.deps import get_order_service
-from api.schemas import OrderRead, OrderCreate
-from services.order import OrderService
 
 router = APIRouter()
 
@@ -18,7 +17,7 @@ async def healthcheck():
 async def create_order(
         order_in: OrderCreate,
         service: OrderService = Depends(get_order_service)
-):
+) -> OrderRead:
     current_user_id = uuid.uuid4()
 
     return await service.create_new_order(current_user_id, order_in)

@@ -2,7 +2,7 @@ import uuid
 from decimal import Decimal
 
 from app.api.schemas import OrderItemCreate
-from app.core.interfaces import AbstractOrderRepository
+from app.interfaces import AbstractOrderRepository
 from app.models import Order, OrderItem
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession

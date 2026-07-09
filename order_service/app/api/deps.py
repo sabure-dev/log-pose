@@ -1,5 +1,5 @@
-from app.core.database import get_db
-from app.core.interfaces import AbstractUnitOfWork
+from app.database import get_db
+from app.interfaces import AbstractUnitOfWork
 from app.repositories.uow import SqlAlchemyUnitOfWork
 from app.services.order import OrderService
 from fastapi import Depends
