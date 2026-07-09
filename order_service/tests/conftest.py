@@ -20,7 +20,10 @@ engine_test = create_async_engine(
 )
 
 TestingSessionLocal = async_sessionmaker(
-    autocommit=False, autoflush=False, bind=engine_test, expire_on_commit=False,
+    autocommit=False,
+    autoflush=False,
+    bind=engine_test,
+    expire_on_commit=False,
 )
 
 
@@ -49,6 +52,6 @@ async def async_client(db_session):
     app.dependency_overrides[get_db] = override_get_db
 
     async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://testserver"
+        transport=ASGITransport(app=app), base_url="http://testserver"
     ) as ac:
         yield ac

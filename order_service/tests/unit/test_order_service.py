@@ -11,7 +11,9 @@ class FakeOrderRepository(AbstractOrderRepository):
     def __init__(self):
         self.orders: dict[uuid.UUID, Order] = {}
 
-    async def add(self, user_id: uuid.UUID, total_amount: Decimal, items: list) -> Order:
+    async def add(
+        self, user_id: uuid.UUID, total_amount: Decimal, items: list
+    ) -> Order:
         new_order = Order(id=uuid.uuid4(), user_id=user_id, total_amount=total_amount)
         self.orders[new_order.id] = new_order
         return new_order
@@ -38,13 +40,17 @@ async def test_create_order_calculates_total_and_commits():
     service = OrderService(uow=uow)
 
     user_id = uuid.uuid4()
-    item1 = OrderItemCreate(product_id=uuid.uuid4(), quantity=2, price=Decimal("150.00"))
-    item2 = OrderItemCreate(product_id=uuid.uuid4(), quantity=1, price=Decimal("50.00"))
+    item1 = OrderItemCreate(
+        product_id=uuid.uuid4(), quantity=2, price=Decimal("150.00")
+    )
+    item2 = OrderItemCreate(
+        product_id=uuid.uuid4(), quantity=1, price=Decimal("100.00")
+    )
     order_in = OrderCreate(items=[item1, item2])
 
     order = await service.create_new_order(user_id=user_id, order_in=order_in)
 
-    assert order.total_amount == Decimal("350.00")
+    assert order.total_amount == Decimal("400.00")
 
     assert order.user_id == user_id
 

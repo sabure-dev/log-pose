@@ -13,7 +13,12 @@ class SqlAlchemyOrderRepository(AbstractOrderRepository):
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def add(self, user_id: uuid.UUID, total_amount: Decimal, items_data: list[OrderItemCreate]) -> Order:
+    async def add(
+        self,
+        user_id: uuid.UUID,
+        total_amount: Decimal,
+        items_data: list[OrderItemCreate],
+    ) -> Order:
         new_order = Order(user_id=user_id, total_amount=total_amount)
         self.session.add(new_order)
         await self.session.flush()
@@ -31,9 +36,7 @@ class SqlAlchemyOrderRepository(AbstractOrderRepository):
 
     async def get(self, order_id: uuid.UUID) -> Order | None:
         query = (
-            select(Order)
-            .where(Order.id == order_id)
-            .options(selectinload(Order.items))
+            select(Order).where(Order.id == order_id).options(selectinload(Order.items))
         )
         result = await self.session.execute(query)
         return result.scalar_one_or_none()

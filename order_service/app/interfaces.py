@@ -8,7 +8,9 @@ from app.models import Order
 
 class AbstractOrderRepository(ABC):
     @abstractmethod
-    async def add(self, user_id: uuid.UUID, total_amount: Decimal, items: list[OrderItemCreate]) -> Order:
+    async def add(
+        self, user_id: uuid.UUID, total_amount: Decimal, items: list[OrderItemCreate]
+    ) -> Order:
         raise NotImplementedError
 
     @abstractmethod

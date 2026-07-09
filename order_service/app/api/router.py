@@ -5,10 +5,7 @@ from app.api.schemas import OrderRead, OrderCreate
 from app.services.order import OrderService
 from fastapi import APIRouter, status, Depends
 
-router = APIRouter(
-    prefix="/orders",
-    tags=["Orders"]
-)
+router = APIRouter(prefix="/orders", tags=["Orders"])
 
 
 @router.get("/healthcheck", status_code=status.HTTP_200_OK)
@@ -18,8 +15,7 @@ async def healthcheck():
 
 @router.post("/", response_model=OrderRead, status_code=status.HTTP_201_CREATED)
 async def create_order(
-        order_in: OrderCreate,
-        service: OrderService = Depends(get_order_service)
+    order_in: OrderCreate, service: OrderService = Depends(get_order_service)
 ) -> OrderRead:
     current_user_id = uuid.uuid4()
 

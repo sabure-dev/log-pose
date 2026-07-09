@@ -15,9 +15,7 @@ async def test_repository_can_save_and_retrieve_order(db_session):
     ]
 
     draft_order = await repo.add(
-        user_id=user_id,
-        total_amount=Decimal("300.00"),
-        items_data=items_data
+        user_id=user_id, total_amount=Decimal("300.00"), items_data=items_data
     )
 
     await db_session.commit()
