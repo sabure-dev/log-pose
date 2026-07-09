@@ -5,7 +5,10 @@ from app.api.schemas import OrderRead, OrderCreate
 from app.services.order import OrderService
 from fastapi import APIRouter, status, Depends
 
-router = APIRouter()
+router = APIRouter(
+    prefix="/orders",
+    tags=["Orders"]
+)
 
 
 @router.get("/healthcheck", status_code=status.HTTP_200_OK)
