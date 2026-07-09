@@ -36,5 +36,11 @@ jobs:
       - name: Ruff Formatter
         run: uv run ruff format --check .
 
-      - name: Запуск тестов (Pytest)
+      - name: Running tests
+        env:
+          DB_USER: dummy_user
+          DB_PASS: dummy_pass
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_NAME: dummy_db
         run: uv run pytest
