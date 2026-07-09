@@ -9,6 +9,9 @@ on:
 jobs:
   python-test-and-lint:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./order_service
 
     steps:
       - name: Clone repo
