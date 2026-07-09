@@ -1,0 +1,10 @@
+[project]
+name = "order-service"
+version = "0.1.0"
+description = "Log Pose Order Service"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.139.0",
+    "pydantic-settings>=2.14.2",
+]
