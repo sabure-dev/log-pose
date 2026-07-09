@@ -2,8 +2,9 @@ import uuid
 from decimal import Decimal
 
 import pytest
-from app.api.schemas import OrderCreate, OrderItemCreate
 from pydantic import ValidationError
+
+from app.api.schemas import OrderCreate, OrderItemCreate
 
 
 def test_valid_order_item_creation():
