@@ -21,6 +21,19 @@ services:
       timeout: 5s
       retries: 5
 
+  api:
+    build: order_service/
+    container_name: orders_api
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+    env_file:
+      - order_service/.env
+    restart: on-failure
+    networks:
+      - logpose_net
+
 networks:
   logpose_net:
     driver: bridge
