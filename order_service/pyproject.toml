@@ -16,6 +16,7 @@ dependencies = [
 dev = [
     "aiosqlite>=0.22.1",
     "httpx>=0.28.1",
+    "pre-commit>=4.6.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.15.20",
@@ -24,4 +25,14 @@ dev = [
 [tool.ruff]
 extend-exclude = [
     "migrations/versions",
+    ".git",
+    ".venv",
+    "__pycache__",
+    "alembic",
 ]
+line-length = 88
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = []
