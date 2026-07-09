@@ -1,9 +1,10 @@
 import uuid
 
+from fastapi import APIRouter, Depends, status
+
 from app.api.deps import get_order_service
-from app.api.schemas import OrderRead, OrderCreate
+from app.api.schemas import OrderCreate, OrderRead
 from app.services.order import OrderService
-from fastapi import APIRouter, status, Depends
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 

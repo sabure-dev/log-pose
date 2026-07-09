@@ -1,6 +1,7 @@
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.interfaces import AbstractUnitOfWork
 from app.repositories.order import SqlAlchemyOrderRepository
-from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
