@@ -11,3 +11,13 @@ dependencies = [
     "pydantic-settings>=2.14.2",
     "sqlalchemy>=2.0.51",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.20",
+]
+
+[tool.ruff]
+extend-exclude = [
+    "migrations/versions",
+]
