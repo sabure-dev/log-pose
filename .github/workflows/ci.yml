@@ -9,9 +9,16 @@ on:
 jobs:
   python-test-and-lint:
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - order_service
+
     defaults:
       run:
-        working-directory: ./order_service
+        working-directory: ./${{ matrix.service }}
 
     steps:
       - name: Clone repo
