@@ -1,14 +1,25 @@
 import uuid
 from datetime import datetime
 from decimal import Decimal
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from app.enums import OrderStatus
 
 
 class OrderItemCreate(BaseModel):
     product_id: uuid.UUID
-    quantity: int = Field(default=1, ge=1)
-    price: Decimal = Field(ge=0, decimal_places=2)
+    quantity: Annotated[int, Field(ge=1)] = 1
+    price: Annotated[Decimal, Field(ge=0, decimal_places=2)]
+
+
+class OrderCreate(BaseModel):
+    items: Annotated[list["OrderItemCreate"], Field(min_length=1)]
+
+
+class OrderStatusUpdate(BaseModel):
+    status: OrderStatus
 
 
 class OrderItemRead(BaseModel):
@@ -20,14 +31,10 @@ class OrderItemRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class OrderCreate(BaseModel):
-    items: list[OrderItemCreate] = Field(min_length=1)
-
-
 class OrderRead(BaseModel):
     id: uuid.UUID
     user_id: uuid.UUID
-    status: str
+    status: OrderStatus
     total_amount: Decimal
     created_at: datetime
     updated_at: datetime

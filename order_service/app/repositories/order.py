@@ -1,5 +1,6 @@
 import uuid
 from decimal import Decimal
+from typing import Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,3 +42,10 @@ class SqlAlchemyOrderRepository(AbstractOrderRepository):
         )
         result = await self.session.execute(query)
         return result.scalar_one_or_none()
+
+    async def get_all(self, skip: int = 0, limit: int = 100) -> Sequence[Order]:
+        query = (
+            select(Order).options(selectinload(Order.items)).offset(skip).limit(limit)
+        )
+        result = await self.session.execute(query)
+        return result.scalars().all()

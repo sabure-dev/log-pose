@@ -1,7 +1,9 @@
 import uuid
 from decimal import Decimal
+from typing import Sequence
 
 from app.api.schemas import OrderCreate, OrderItemCreate
+from app.enums import OrderStatus
 from app.interfaces import AbstractOrderRepository, AbstractUnitOfWork
 from app.models import Order
 from app.services.order import OrderService
@@ -15,11 +17,15 @@ class FakeOrderRepository(AbstractOrderRepository):
         self, user_id: uuid.UUID, total_amount: Decimal, items: list
     ) -> Order:
         new_order = Order(id=uuid.uuid4(), user_id=user_id, total_amount=total_amount)
+        new_order.status = OrderStatus.PENDING.value
         self.orders[new_order.id] = new_order
         return new_order
 
     async def get(self, order_id: uuid.UUID) -> Order | None:
         return self.orders.get(order_id)
+
+    async def get_all(self, skip: int = 0, limit: int = 100) -> Sequence[Order]:
+        return list(self.orders.values())[skip : skip + limit]
 
 
 class FakeUnitOfWork(AbstractUnitOfWork):
@@ -58,3 +64,48 @@ async def test_create_order_calculates_total_and_commits():
     assert uow.rollbacked is False
 
     assert order.id in uow.orders.orders
+
+
+async def test_get_orders_pagination():
+    uow = FakeUnitOfWork()
+    service = OrderService(uow=uow)
+    user_id = uuid.uuid4()
+
+    for _ in range(5):
+        await uow.orders.add(user_id, Decimal("100.00"), [])
+
+    orders_page_1 = await service.get_orders(skip=0, limit=3)
+    orders_page_2 = await service.get_orders(skip=3, limit=3)
+
+    assert len(orders_page_1) == 3
+    assert len(orders_page_2) == 2  # Осталось только 2 заказа
+
+
+async def test_get_order_by_id():
+    uow = FakeUnitOfWork()
+    service = OrderService(uow=uow)
+    user_id = uuid.uuid4()
+
+    draft_order = await uow.orders.add(user_id, Decimal("250.00"), [])
+
+    found_order = await service.get_order(draft_order.id)
+
+    assert found_order is not None
+    assert found_order.id == draft_order.id
+    assert found_order.total_amount == Decimal("250.00")
+
+
+async def test_update_order_status():
+    uow = FakeUnitOfWork()
+    service = OrderService(uow=uow)
+    user_id = uuid.uuid4()
+
+    draft_order = await uow.orders.add(user_id, Decimal("100.00"), [])
+
+    updated_order = await service.update_order_status(
+        draft_order.id, OrderStatus.RESERVED
+    )
+
+    assert updated_order is not None
+    assert updated_order.status == OrderStatus.RESERVED.value
+    assert uow.committed is True

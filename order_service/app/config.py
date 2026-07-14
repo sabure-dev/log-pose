@@ -11,8 +11,8 @@ class Settings(BaseSettings):
     db_host: str = "localhost"
     db_port: int = 5432
     db_name: str = "orders_db"
-    db_user: str
-    db_pass: str
+    db_user: str = "user"
+    db_pass: str = "pass"
 
     @computed_field
     @property

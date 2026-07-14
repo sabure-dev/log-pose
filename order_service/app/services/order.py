@@ -1,7 +1,10 @@
 import uuid
+from typing import Sequence
 
 from app.api.schemas import OrderCreate
+from app.enums import OrderStatus
 from app.interfaces import AbstractUnitOfWork
+from app.models import Order
 
 
 class OrderService:
@@ -19,3 +22,24 @@ class OrderService:
             final_order = await self.uow.orders.get(draft_order.id)
 
         return final_order
+
+    async def get_order(self, order_id: uuid.UUID) -> Order | None:
+        async with self.uow:
+            return await self.uow.orders.get(order_id)
+
+    async def get_orders(self, skip: int = 0, limit: int = 100) -> Sequence[Order]:
+        async with self.uow:
+            return await self.uow.orders.get_all(skip, limit)
+
+    async def update_order_status(
+        self, order_id: uuid.UUID, status: OrderStatus
+    ) -> Order | None:
+        async with self.uow:
+            order = await self.uow.orders.get(order_id)
+            if not order:
+                return None
+
+            order.status = status.value
+            await self.uow.commit()
+            updated_order = await self.uow.orders.get(order_id)
+            return updated_order

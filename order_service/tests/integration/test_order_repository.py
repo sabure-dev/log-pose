@@ -30,3 +30,28 @@ async def test_repository_can_save_and_retrieve_order(db_session):
     assert len(saved_order.items) == 1
     assert saved_order.items[0].product_id == product_id
     assert saved_order.items[0].quantity == 2
+
+
+async def test_repository_can_get_all_orders_with_pagination(db_session):
+    repo = SqlAlchemyOrderRepository(session=db_session)
+    user_id = uuid.uuid4()
+
+    for _ in range(3):
+        items_data = [
+            OrderItemCreate(
+                product_id=uuid.uuid4(), quantity=1, price=Decimal("100.00")
+            )
+        ]
+        await repo.add(
+            user_id=user_id, total_amount=Decimal("100.00"), items_data=items_data
+        )
+
+    await db_session.commit()
+
+    page_1 = await repo.get_all(skip=0, limit=2)
+    page_2 = await repo.get_all(skip=2, limit=2)
+
+    assert len(page_1) == 2
+    assert len(page_2) == 1
+
+    assert len(page_1[0].items) == 1

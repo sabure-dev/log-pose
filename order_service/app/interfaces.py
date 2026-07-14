@@ -1,6 +1,7 @@
 import uuid
 from abc import ABC, abstractmethod
 from decimal import Decimal
+from typing import Sequence
 
 from app.api.schemas import OrderItemCreate
 from app.models import Order
@@ -15,6 +16,10 @@ class AbstractOrderRepository(ABC):
 
     @abstractmethod
     async def get(self, order_id: uuid.UUID) -> Order | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_all(self, skip: int = 0, limit: int = 100) -> Sequence[Order]:
         raise NotImplementedError
 
 
