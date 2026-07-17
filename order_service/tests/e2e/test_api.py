@@ -1,11 +1,12 @@
 import uuid
 
 from httpx import AsyncClient
+from sqlalchemy import text
 
 from app.enums import OrderStatus
 
 
-async def test_create_order_endpoint(async_client: AsyncClient):
+async def test_create_order_endpoint(async_client: AsyncClient, db_session):
     payload = {
         "items": [
             {
@@ -35,6 +36,13 @@ async def test_create_order_endpoint(async_client: AsyncClient):
 
     assert len(data["items"]) == 2
     assert data["items"][0]["quantity"] == 2
+
+    result = await db_session.execute(text("SELECT * FROM outbox_events"))
+    events = result.mappings().all()
+
+    assert len(events) == 1
+    assert events[0]["topic"] == "order.created"
+    assert not events[0]["processed"]
 
 
 async def test_create_order_with_invalid_data_returns_422(async_client: AsyncClient):

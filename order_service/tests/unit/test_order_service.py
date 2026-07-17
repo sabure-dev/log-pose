@@ -4,7 +4,11 @@ from typing import Sequence
 
 from app.api.schemas import OrderCreate, OrderItemCreate
 from app.enums import OrderStatus
-from app.interfaces import AbstractOrderRepository, AbstractUnitOfWork
+from app.interfaces import (
+    AbstractOrderRepository,
+    AbstractOutboxRepository,
+    AbstractUnitOfWork,
+)
 from app.models import Order
 from app.services.order import OrderService
 
@@ -28,9 +32,18 @@ class FakeOrderRepository(AbstractOrderRepository):
         return list(self.orders.values())[skip : skip + limit]
 
 
+class FakeOutboxRepository(AbstractOutboxRepository):
+    def __init__(self):
+        self.events = []
+
+    async def add(self, topic: str, payload: dict) -> None:
+        self.events.append({"topic": topic, "payload": payload})
+
+
 class FakeUnitOfWork(AbstractUnitOfWork):
     def __init__(self):
         self.orders = FakeOrderRepository()
+        self.outbox = FakeOutboxRepository()
         self.committed = False
         self.rollbacked = False
 
@@ -65,6 +78,12 @@ async def test_create_order_calculates_total_and_commits():
 
     assert order.id in uow.orders.orders
 
+    assert len(uow.outbox.events) == 1
+    event = uow.outbox.events[0]
+    assert event["topic"] == "order.created"
+    assert event["payload"]["order_id"] == str(order.id)
+    assert event["payload"]["total_amount"] == 400.0
+
 
 async def test_get_orders_pagination():
     uow = FakeUnitOfWork()
@@ -78,7 +97,7 @@ async def test_get_orders_pagination():
     orders_page_2 = await service.get_orders(skip=3, limit=3)
 
     assert len(orders_page_1) == 3
-    assert len(orders_page_2) == 2  # Осталось только 2 заказа
+    assert len(orders_page_2) == 2
 
 
 async def test_get_order_by_id():
