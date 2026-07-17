@@ -2,6 +2,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.interfaces import AbstractUnitOfWork
 from app.repositories.order import SqlAlchemyOrderRepository
+from app.repositories.outbox import SqlAlchemyOutboxRepository
 
 
 class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
@@ -10,6 +11,7 @@ class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
 
     async def __aenter__(self):
         self.orders = SqlAlchemyOrderRepository(self.session)
+        self.outbox = SqlAlchemyOutboxRepository(self.session)
         return await super().__aenter__()
 
     async def commit(self):

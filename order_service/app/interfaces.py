@@ -1,7 +1,7 @@
 import uuid
 from abc import ABC, abstractmethod
 from decimal import Decimal
-from typing import Sequence
+from typing import Any, Sequence
 
 from app.api.schemas import OrderItemCreate
 from app.models import Order
@@ -10,7 +10,10 @@ from app.models import Order
 class AbstractOrderRepository(ABC):
     @abstractmethod
     async def add(
-        self, user_id: uuid.UUID, total_amount: Decimal, items: list[OrderItemCreate]
+        self,
+        user_id: uuid.UUID,
+        total_amount: Decimal,
+        items_data: list[OrderItemCreate],
     ) -> Order:
         raise NotImplementedError
 
@@ -23,8 +26,23 @@ class AbstractOrderRepository(ABC):
         raise NotImplementedError
 
 
+class AbstractMessageBroker(ABC):
+    @abstractmethod
+    async def publish_event(
+        self, queue_name: str, event_type: str, payload: dict[str, Any]
+    ) -> None:
+        raise NotImplementedError
+
+
+class AbstractOutboxRepository(ABC):
+    @abstractmethod
+    async def add(self, topic: str, payload: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+
 class AbstractUnitOfWork(ABC):
     orders: AbstractOrderRepository
+    outbox: AbstractOutboxRepository
 
     async def __aenter__(self) -> "AbstractUnitOfWork":
         return self

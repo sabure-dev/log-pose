@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal
 from typing import Sequence
 
 from app.api.schemas import OrderCreate
@@ -12,12 +13,32 @@ class OrderService:
         self.uow = uow
 
     async def create_new_order(self, user_id: uuid.UUID, order_in: OrderCreate):
-        total_amount = sum(item.price * item.quantity for item in order_in.items)
+        total_amount = Decimal(
+            sum(item.price * item.quantity for item in order_in.items)
+        )
 
         async with self.uow:
             draft_order = await self.uow.orders.add(
                 user_id, total_amount, order_in.items
             )
+
+            event_payload = {
+                "event_type": "OrderCreated",
+                "order_id": str(draft_order.id),
+                "user_id": str(user_id),
+                "total_amount": float(total_amount),
+                "items": [
+                    {
+                        "product_id": str(item.product_id),
+                        "quantity": item.quantity,
+                        "price": float(item.price),
+                    }
+                    for item in order_in.items
+                ],
+            }
+
+            await self.uow.outbox.add(topic="order.created", payload=event_payload)
+
             await self.uow.commit()
             final_order = await self.uow.orders.get(draft_order.id)
 
