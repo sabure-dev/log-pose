@@ -21,18 +21,54 @@ services:
       timeout: 5s
       retries: 5
 
-  api:
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: logpose_rabbitmq
+    restart: unless-stopped
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS}
+    networks:
+      - logpose_net
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  order_service:
     build: order_service/
     container_name: orders_api
     ports:
       - "8000:8000"
     depends_on:
-      - postgres
+      postgres:
+          condition: service_healthy
+      rabbitmq:
+          condition: service_healthy
     env_file:
       - order_service/.env
     restart: on-failure
     networks:
       - logpose_net
+
+  order_outbox_worker:
+      build: order_service/
+      container_name: logpose_outbox_worker
+      command: ["uv", "run", "python", "-m", "app.workers.outbox_relay"]
+      depends_on:
+        postgres:
+          condition: service_healthy
+        rabbitmq:
+          condition: service_healthy
+      env_file:
+        - order_service/.env
+      restart: always
+      networks:
+        - logpose_net
 
 networks:
   logpose_net:

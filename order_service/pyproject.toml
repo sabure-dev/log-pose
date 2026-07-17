@@ -5,6 +5,7 @@ description = "Log Pose Order Service"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "aio-pika>=10.0.1",
     "alembic>=1.18.5",
     "asyncpg>=0.31.0",
     "fastapi[standard]>=0.139.0",

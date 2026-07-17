@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     db_user: str = "user"
     db_pass: str = "pass"
 
+    rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
+
     @computed_field
     @property
     def database_url(self) -> str:
