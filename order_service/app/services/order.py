@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Sequence
 
@@ -13,8 +14,8 @@ class OrderService:
         self.uow = uow
 
     async def create_new_order(self, user_id: uuid.UUID, order_in: OrderCreate):
-        total_amount = Decimal(
-            sum(item.price * item.quantity for item in order_in.items)
+        total_amount = sum(
+            (item.price * item.quantity for item in order_in.items), Decimal("0.00")
         )
 
         async with self.uow:
@@ -22,22 +23,27 @@ class OrderService:
                 user_id, total_amount, order_in.items
             )
 
+            event_id = uuid.uuid4()
             event_payload = {
+                "event_id": str(event_id),
                 "event_type": "OrderCreated",
                 "order_id": str(draft_order.id),
                 "user_id": str(user_id),
-                "total_amount": float(total_amount),
+                "total_amount": str(total_amount),
                 "items": [
                     {
                         "product_id": str(item.product_id),
                         "quantity": item.quantity,
-                        "price": float(item.price),
+                        "price": str(item.price),
                     }
                     for item in order_in.items
                 ],
+                "occurred_at": datetime.now(timezone.utc).isoformat(),
             }
 
-            await self.uow.outbox.add(topic="order.created", payload=event_payload)
+            await self.uow.outbox.add(
+                topic="order.created", payload=event_payload, event_id=event_id
+            )
 
             await self.uow.commit()
             final_order = await self.uow.orders.get(draft_order.id)
