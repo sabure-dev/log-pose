@@ -8,3 +8,4 @@ bin/
 *.exe
 
 .idea/
+.DS_Store
