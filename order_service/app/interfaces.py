@@ -48,7 +48,6 @@ class AbstractUnitOfWork(ABC):
         if exc_type is not None:
             await self.rollback()
 
-
     @abstractmethod
     async def commit(self):
         raise NotImplementedError

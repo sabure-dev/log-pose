@@ -39,9 +39,7 @@ class FakeOutboxRepository(AbstractOutboxRepository):
     async def add(
         self, topic: str, payload: dict, event_id: uuid.UUID | None = None
     ) -> None:
-        self.events.append(
-            {"topic": topic, "payload": payload, "event_id": event_id}
-        )
+        self.events.append({"topic": topic, "payload": payload, "event_id": event_id})
 
 
 class FakeUnitOfWork(AbstractUnitOfWork):
