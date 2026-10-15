@@ -36,8 +36,10 @@ class FakeOutboxRepository(AbstractOutboxRepository):
     def __init__(self):
         self.events = []
 
-    async def add(self, topic: str, payload: dict) -> None:
-        self.events.append({"topic": topic, "payload": payload})
+    async def add(
+        self, topic: str, payload: dict, event_id: uuid.UUID | None = None
+    ) -> None:
+        self.events.append({"topic": topic, "payload": payload, "event_id": event_id})
 
 
 class FakeUnitOfWork(AbstractUnitOfWork):
@@ -70,19 +72,21 @@ async def test_create_order_calculates_total_and_commits():
     order = await service.create_new_order(user_id=user_id, order_in=order_in)
 
     assert order.total_amount == Decimal("400.00")
-
     assert order.user_id == user_id
-
     assert uow.committed is True
     assert uow.rollbacked is False
-
     assert order.id in uow.orders.orders
 
     assert len(uow.outbox.events) == 1
     event = uow.outbox.events[0]
     assert event["topic"] == "order.created"
     assert event["payload"]["order_id"] == str(order.id)
-    assert event["payload"]["total_amount"] == 400.0
+    assert event["payload"]["total_amount"] == "400.00"
+    assert event["payload"]["items"][0]["price"] == "150.00"
+    assert event["payload"]["items"][1]["price"] == "100.00"
+    assert "event_id" in event["payload"]
+    assert "occurred_at" in event["payload"]
+    assert str(event["event_id"]) == event["payload"]["event_id"]
 
 
 async def test_get_orders_pagination():
