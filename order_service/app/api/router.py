@@ -3,7 +3,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from app.api.deps import OrderServiceDep
+from app.api.deps import OrderServiceDep, UserIdDep
 from app.api.schemas import OrderCreate, OrderRead, OrderStatusUpdate
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
@@ -15,8 +15,11 @@ async def healthcheck():
 
 
 @router.post("/", response_model=OrderRead, status_code=status.HTTP_201_CREATED)
-async def create_order(order_in: OrderCreate, service: OrderServiceDep) -> OrderRead:
-    current_user_id = uuid.uuid4()
+async def create_order(
+    order_in: OrderCreate,
+    service: OrderServiceDep,
+    current_user_id: UserIdDep,
+) -> OrderRead:
     return await service.create_new_order(current_user_id, order_in)
 
 
