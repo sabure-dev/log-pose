@@ -28,8 +28,8 @@ async def run_outbox_relay():
             async with async_session_maker() as session:
                 stmt = (
                     select(OutboxEvent)
-                    .where(not OutboxEvent.processed)
-                    .order_by(OutboxEvent.created_at)
+                    .where(OutboxEvent.processed.is_(False))
+                    .order_by(OutboxEvent.created_at.asc())
                     .limit(50)
                     .with_for_update(skip_locked=True)
                 )
@@ -43,7 +43,10 @@ async def run_outbox_relay():
                 for event in events:
                     body = json.dumps(event.payload, default=str).encode("utf-8")
                     msg = aio_pika.Message(
-                        body=body, delivery_mode=aio_pika.DeliveryMode.PERSISTENT
+                        body=body,
+                        delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                        message_id=str(event.id),
+                        content_type="application/json",
                     )
 
                     await exchange.publish(msg, routing_key=event.topic)
