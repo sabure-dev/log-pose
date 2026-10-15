@@ -21,19 +21,20 @@ class SqlAlchemyOrderRepository(AbstractOrderRepository):
         total_amount: Decimal,
         items_data: list[OrderItemCreate],
     ) -> Order:
-        new_order = Order(user_id=user_id, total_amount=total_amount)
+        new_order = Order(
+            user_id=user_id,
+            total_amount=total_amount,
+            items=[
+                OrderItem(
+                    product_id=item.product_id,
+                    quantity=item.quantity,
+                    price=item.price,
+                )
+                for item in items_data
+            ],
+        )
         self.session.add(new_order)
         await self.session.flush()
-
-        for item in items_data:
-            new_item = OrderItem(
-                order_id=new_order.id,
-                product_id=item.product_id,
-                quantity=item.quantity,
-                price=item.price,
-            )
-            self.session.add(new_item)
-
         return new_order
 
     async def get(self, order_id: uuid.UUID) -> Order | None:
@@ -45,7 +46,11 @@ class SqlAlchemyOrderRepository(AbstractOrderRepository):
 
     async def get_all(self, skip: int = 0, limit: int = 100) -> Sequence[Order]:
         query = (
-            select(Order).options(selectinload(Order.items)).offset(skip).limit(limit)
+            select(Order)
+            .options(selectinload(Order.items))
+            .order_by(Order.created_at.desc())
+            .offset(skip)
+            .limit(limit)
         )
         result = await self.session.execute(query)
         return result.scalars().all()
