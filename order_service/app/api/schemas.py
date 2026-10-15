@@ -3,19 +3,30 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.enums import OrderStatus
 
 
 class OrderItemCreate(BaseModel):
     product_id: uuid.UUID
-    quantity: Annotated[int, Field(ge=1)] = 1
-    price: Annotated[Decimal, Field(ge=0, decimal_places=2)]
+    quantity: Annotated[int, Field(ge=1, le=10000)] = 1
+    # TODO: remove price from DTO once inventory/catalog service provides pricing
+    price: Annotated[Decimal, Field(gt=0, max_digits=10, decimal_places=2)]
 
 
 class OrderCreate(BaseModel):
-    items: Annotated[list["OrderItemCreate"], Field(min_length=1)]
+    items: Annotated[list[OrderItemCreate], Field(min_length=1)]
+
+    @field_validator("items")
+    @classmethod
+    def validate_unique_products(
+        cls, items: list[OrderItemCreate]
+    ) -> list[OrderItemCreate]:
+        product_ids = [item.product_id for item in items]
+        if len(product_ids) != len(set(product_ids)):
+            raise ValueError("Duplicate product_id found in items")
+        return items
 
 
 class OrderStatusUpdate(BaseModel):
