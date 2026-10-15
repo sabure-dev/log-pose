@@ -30,7 +30,9 @@ def test_invalid_order_item_zero_quantity():
 
 def test_invalid_order_item_excessive_quantity():
     with pytest.raises(ValidationError):
-        OrderItemCreate(product_id=uuid.uuid4(), quantity=10001, price=Decimal("100.00"))
+        OrderItemCreate(
+            product_id=uuid.uuid4(), quantity=10001, price=Decimal("100.00")
+        )
 
 
 def test_empty_order_items_list():
@@ -43,7 +45,11 @@ def test_duplicate_products_in_order_create():
     with pytest.raises(ValidationError):
         OrderCreate(
             items=[
-                OrderItemCreate(product_id=product_id, quantity=1, price=Decimal("10.00")),
-                OrderItemCreate(product_id=product_id, quantity=2, price=Decimal("10.00")),
+                OrderItemCreate(
+                    product_id=product_id, quantity=1, price=Decimal("10.00")
+                ),
+                OrderItemCreate(
+                    product_id=product_id, quantity=2, price=Decimal("10.00")
+                ),
             ]
         )
