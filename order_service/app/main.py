@@ -10,7 +10,10 @@ from app.database import engine
 
 logging.basicConfig(
     level=logging.INFO,
-    format='{"time": "%(asctime)s", "level": "%(levelname)s", "name": "%(name)s", "message": "%(message)s"}',
+    format=(
+        '{"time": "%(asctime)s", "level": "%(levelname)s", '
+        '"name": "%(name)s", "message": "%(message)s"}'
+    ),
 )
 logger = logging.getLogger("order_service")
 
