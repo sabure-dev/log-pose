@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     db_name: str = "orders_db"
     db_user: str = "user"
     db_pass: str = "pass"
+    db_echo: bool = False
 
     rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
 

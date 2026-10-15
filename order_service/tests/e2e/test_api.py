@@ -1,3 +1,4 @@
+import json
 import uuid
 
 from httpx import AsyncClient
@@ -7,6 +8,7 @@ from app.enums import OrderStatus
 
 
 async def test_create_order_endpoint(async_client: AsyncClient, db_session):
+    custom_user_id = str(uuid.uuid4())
     payload = {
         "items": [
             {
@@ -22,7 +24,9 @@ async def test_create_order_endpoint(async_client: AsyncClient, db_session):
         ]
     }
 
-    response = await async_client.post("/orders/", json=payload)
+    response = await async_client.post(
+        "/orders/", json=payload, headers={"X-User-Id": custom_user_id}
+    )
 
     assert response.status_code == 201
 
@@ -30,8 +34,8 @@ async def test_create_order_endpoint(async_client: AsyncClient, db_session):
 
     assert "id" in data
     assert "created_at" in data
+    assert data["user_id"] == custom_user_id
     assert data["status"] == "pending"
-
     assert data["total_amount"] == "3301.00"
 
     assert len(data["items"]) == 2
@@ -43,6 +47,12 @@ async def test_create_order_endpoint(async_client: AsyncClient, db_session):
     assert len(events) == 1
     assert events[0]["topic"] == "order.created"
     assert not events[0]["processed"]
+
+    payload_data = json.loads(events[0]["payload"])
+    assert payload_data["total_amount"] == "3301.00"
+    assert payload_data["user_id"] == custom_user_id
+    assert "event_id" in payload_data
+    assert "occurred_at" in payload_data
 
 
 async def test_create_order_with_invalid_data_returns_422(async_client: AsyncClient):
@@ -63,6 +73,7 @@ async def test_create_order_with_invalid_data_returns_422(async_client: AsyncCli
     assert len(errors) == 2
     error_types = [err["type"] for err in errors]
     assert "greater_than_equal" in error_types
+    assert "greater_than" in error_types
 
 
 async def test_get_order_list(async_client: AsyncClient):
