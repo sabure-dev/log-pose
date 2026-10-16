@@ -53,9 +53,7 @@ async def test_repository_can_get_orders_filtered_by_user(db_session):
 
     for _ in range(2):
         items_data = [
-            OrderItemCreate(
-                product_id=uuid.uuid4(), quantity=1, price=Decimal("50.00")
-            )
+            OrderItemCreate(product_id=uuid.uuid4(), quantity=1, price=Decimal("50.00"))
         ]
         await repo.add(
             user_id=other_user_id, total_amount=Decimal("50.00"), items_data=items_data

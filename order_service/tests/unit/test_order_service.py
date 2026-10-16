@@ -167,9 +167,7 @@ async def test_get_order_by_id_scoped_to_user():
     assert found_order is not None
     assert found_order.id == draft_order.id
 
-    unauthorized_order = await service.get_order(
-        draft_order.id, user_id=other_user_id
-    )
+    unauthorized_order = await service.get_order(draft_order.id, user_id=other_user_id)
     assert unauthorized_order is None
 
 
