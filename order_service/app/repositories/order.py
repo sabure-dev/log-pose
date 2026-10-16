@@ -6,9 +6,31 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.domain import NewOrderItem, OrderEntity, OrderItemEntity
+from app.enums import OrderStatus
 from app.interfaces import AbstractOrderRepository
 from app.models import Order, OrderItem
-from app.schemas import OrderItemCreate
+
+
+def _to_entity(order: Order) -> OrderEntity:
+    return OrderEntity(
+        id=order.id,
+        user_id=order.user_id,
+        status=OrderStatus(order.status),
+        total_amount=order.total_amount,
+        shipping_address=order.shipping_address,
+        created_at=order.created_at,
+        updated_at=order.updated_at,
+        items=[
+            OrderItemEntity(
+                id=item.id,
+                product_id=item.product_id,
+                quantity=item.quantity,
+                price=item.price,
+            )
+            for item in order.items
+        ],
+    )
 
 
 class SqlAlchemyOrderRepository(AbstractOrderRepository):
@@ -19,9 +41,9 @@ class SqlAlchemyOrderRepository(AbstractOrderRepository):
         self,
         user_id: uuid.UUID,
         total_amount: Decimal,
-        items_data: list[OrderItemCreate],
+        items_data: Sequence[NewOrderItem],
         shipping_address: str | None = None,
-    ) -> Order:
+    ) -> OrderEntity:
         new_order = Order(
             user_id=user_id,
             total_amount=total_amount,
@@ -37,16 +59,18 @@ class SqlAlchemyOrderRepository(AbstractOrderRepository):
         )
         self.session.add(new_order)
         await self.session.flush()
-        return new_order
+        await self.session.refresh(new_order, attribute_names=["items", "created_at", "updated_at"])
+        return _to_entity(new_order)
 
-    async def get(self, order_id: uuid.UUID) -> Order | None:
+    async def get(self, order_id: uuid.UUID) -> OrderEntity | None:
         query = (
             select(Order).where(Order.id == order_id).options(selectinload(Order.items))
         )
         result = await self.session.execute(query)
-        return result.scalar_one_or_none()
+        order = result.scalar_one_or_none()
+        return _to_entity(order) if order else None
 
-    async def get_for_update(self, order_id: uuid.UUID) -> Order | None:
+    async def get_for_update(self, order_id: uuid.UUID) -> OrderEntity | None:
         query = (
             select(Order)
             .where(Order.id == order_id)
@@ -54,33 +78,39 @@ class SqlAlchemyOrderRepository(AbstractOrderRepository):
             .options(selectinload(Order.items))
         )
         result = await self.session.execute(query)
-        return result.scalar_one_or_none()
+        order = result.scalar_one_or_none()
+        return _to_entity(order) if order else None
+
+    async def update_status(
+        self, order_id: uuid.UUID, status: OrderStatus
+    ) -> OrderEntity | None:
+        query = (
+            select(Order).where(Order.id == order_id).options(selectinload(Order.items))
+        )
+        result = await self.session.execute(query)
+        order = result.scalar_one_or_none()
+        if not order:
+            return None
+        order.status = status.value
+        await self.session.flush()
+        await self.session.refresh(order, attribute_names=["updated_at"])
+        return _to_entity(order)
 
     async def get_by_id_and_user(
         self, order_id: uuid.UUID, user_id: uuid.UUID
-    ) -> Order | None:
+    ) -> OrderEntity | None:
         query = (
             select(Order)
             .where(Order.id == order_id, Order.user_id == user_id)
             .options(selectinload(Order.items))
         )
         result = await self.session.execute(query)
-        return result.scalar_one_or_none()
-
-    async def get_all(self, skip: int = 0, limit: int = 100) -> Sequence[Order]:
-        query = (
-            select(Order)
-            .options(selectinload(Order.items))
-            .order_by(Order.created_at.desc())
-            .offset(skip)
-            .limit(limit)
-        )
-        result = await self.session.execute(query)
-        return result.scalars().all()
+        order = result.scalar_one_or_none()
+        return _to_entity(order) if order else None
 
     async def get_all_by_user(
         self, user_id: uuid.UUID, skip: int = 0, limit: int = 100
-    ) -> Sequence[Order]:
+    ) -> Sequence[OrderEntity]:
         query = (
             select(Order)
             .where(Order.user_id == user_id)
@@ -90,4 +120,4 @@ class SqlAlchemyOrderRepository(AbstractOrderRepository):
             .limit(limit)
         )
         result = await self.session.execute(query)
-        return result.scalars().all()
+        return [_to_entity(o) for o in result.scalars().all()]

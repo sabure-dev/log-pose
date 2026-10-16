@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import signal
 from typing import Sequence
 
 import aio_pika
@@ -8,10 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.database import async_session_maker
+from app.database import async_session_maker, engine
+from app.logging import setup_logging
 from app.models import OutboxEvent
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -23,11 +24,8 @@ async def fetch_unprocessed_events(
         .where(OutboxEvent.processed.is_(False))
         .order_by(OutboxEvent.created_at.asc())
         .limit(batch_size)
+        .with_for_update(skip_locked=True)
     )
-    bind = session.get_bind()
-    if bind is not None and bind.dialect.name == "postgresql":
-        stmt = stmt.with_for_update(skip_locked=True)
-
     result = await session.execute(stmt)
     return result.scalars().all()
 
@@ -50,7 +48,7 @@ async def process_outbox_batch(
             content_type="application/json",
         )
 
-        await exchange.publish(msg, routing_key=event.topic)
+        await exchange.publish(msg, routing_key=event.topic, mandatory=True)
         event.processed = True
         logger.info(f"Event sent: {event.topic} (ID: {event.id})")
 
@@ -59,25 +57,40 @@ async def process_outbox_batch(
 
 
 async def run_outbox_relay():
+    setup_logging()
     logger.info("Starting Outbox Relay Worker...")
 
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop_event.set)
+
     connection = await aio_pika.connect_robust(settings.rabbitmq_url)
-    channel = await connection.channel()
+    try:
+        channel = await connection.channel(publisher_confirms=True)
+        exchange = await channel.declare_exchange(
+            name="logpose_events", type=aio_pika.ExchangeType.TOPIC, durable=True
+        )
 
-    exchange = await channel.declare_exchange(
-        name="logpose_events", type=aio_pika.ExchangeType.TOPIC, durable=True
-    )
-
-    while True:
-        try:
-            async with async_session_maker() as session:
-                processed_count = await process_outbox_batch(session, exchange)
-                if processed_count == 0:
-                    await asyncio.sleep(2)
-
-        except Exception as e:
-            logger.error(f"Outbox worker error: {e}")
-            await asyncio.sleep(5)
+        while not stop_event.is_set():
+            try:
+                async with async_session_maker() as session:
+                    processed_count = await process_outbox_batch(session, exchange)
+                    if processed_count == 0:
+                        try:
+                            await asyncio.wait_for(stop_event.wait(), timeout=2.0)
+                        except asyncio.TimeoutError:
+                            pass
+            except Exception as e:
+                logger.error(f"Outbox worker error: {e}")
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    pass
+    finally:
+        await connection.close()
+        await engine.dispose()
+        logger.info("Outbox Relay Worker stopped cleanly")
 
 
 if __name__ == "__main__":

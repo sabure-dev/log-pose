@@ -12,8 +12,9 @@ import (
 )
 
 type OutboxRelay struct {
-	pool *pgxpool.Pool
-	ch   *amqp.Channel
+	pool    *pgxpool.Pool
+	ch      *amqp.Channel
+	returns <-chan amqp.Return
 }
 
 func NewOutboxRelay(pool *pgxpool.Pool, ch *amqp.Channel) *OutboxRelay {
@@ -38,6 +39,9 @@ func (r *OutboxRelay) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to enable publisher confirms: %w", err)
 	}
 
+	r.returns = r.ch.NotifyReturn(make(chan amqp.Return, 100))
+	notifyClose := r.ch.NotifyClose(make(chan *amqp.Error, 1))
+
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -45,6 +49,11 @@ func (r *OutboxRelay) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case amqpErr, ok := <-notifyClose:
+			if ok && amqpErr != nil {
+				return fmt.Errorf("outbox relay amqp channel closed: %w", amqpErr)
+			}
+			return fmt.Errorf("outbox relay amqp channel closed")
 		case <-ticker.C:
 			if err := r.processBatch(ctx); err != nil {
 				slog.Error("Failed to process outbox batch", "error", err)
@@ -87,17 +96,26 @@ func (r *OutboxRelay) processBatch(ctx context.Context) error {
 		}
 		events = append(events, e)
 	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("rows iteration error: %w", err)
+	}
 	rows.Close()
 
 	if len(events) == 0 {
 		return nil
 	}
 
-	confirms := r.ch.NotifyPublish(make(chan amqp.Confirmation, len(events)))
-	returns := r.ch.NotifyReturn(make(chan amqp.Return, len(events)))
+	for {
+		select {
+		case <-r.returns:
+		default:
+			goto publishLoop
+		}
+	}
 
+publishLoop:
 	for _, e := range events {
-		err := r.ch.PublishWithContext(
+		dc, err := r.ch.PublishWithDeferredConfirmWithContext(
 			ctx,
 			"logpose_events",
 			e.topic,
@@ -114,17 +132,17 @@ func (r *OutboxRelay) processBatch(ctx context.Context) error {
 			return fmt.Errorf("failed to publish outbox event %s: %w", e.id, err)
 		}
 
+		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		ok, err := dc.WaitContext(cctx)
+		cancel()
+		if err != nil || !ok {
+			return fmt.Errorf("publish not confirmed for %s: %w", e.id, err)
+		}
+
 		select {
-		case ret := <-returns:
-			return fmt.Errorf("message %s returned by broker with reply %d: %s", e.id, ret.ReplyCode, ret.ReplyText)
-		case conf := <-confirms:
-			if !conf.Ack {
-				return fmt.Errorf("broker nacked message %s", e.id)
-			}
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(5 * time.Second):
-			return fmt.Errorf("timeout waiting for publish confirmation for %s", e.id)
+		case ret := <-r.returns:
+			return fmt.Errorf("unroutable event %s (topic %s): %s", e.id, e.topic, ret.ReplyText)
+		default:
 		}
 
 		_, err = tx.Exec(ctx, `

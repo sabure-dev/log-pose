@@ -3,8 +3,8 @@ from abc import ABC, abstractmethod
 from decimal import Decimal
 from typing import Any, Sequence
 
-from app.models import Order
-from app.schemas import OrderItemCreate
+from app.domain import NewOrderItem, OrderEntity
+from app.enums import OrderStatus
 
 
 class AbstractOrderRepository(ABC):
@@ -13,33 +13,35 @@ class AbstractOrderRepository(ABC):
         self,
         user_id: uuid.UUID,
         total_amount: Decimal,
-        items_data: list[OrderItemCreate],
+        items_data: Sequence[NewOrderItem],
         shipping_address: str | None = None,
-    ) -> Order:
+    ) -> OrderEntity:
         raise NotImplementedError
 
     @abstractmethod
-    async def get(self, order_id: uuid.UUID) -> Order | None:
+    async def get(self, order_id: uuid.UUID) -> OrderEntity | None:
         raise NotImplementedError
 
     @abstractmethod
-    async def get_for_update(self, order_id: uuid.UUID) -> Order | None:
+    async def get_for_update(self, order_id: uuid.UUID) -> OrderEntity | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def update_status(
+        self, order_id: uuid.UUID, status: OrderStatus
+    ) -> OrderEntity | None:
         raise NotImplementedError
 
     @abstractmethod
     async def get_by_id_and_user(
         self, order_id: uuid.UUID, user_id: uuid.UUID
-    ) -> Order | None:
-        raise NotImplementedError
-
-    @abstractmethod
-    async def get_all(self, skip: int = 0, limit: int = 100) -> Sequence[Order]:
+    ) -> OrderEntity | None:
         raise NotImplementedError
 
     @abstractmethod
     async def get_all_by_user(
         self, user_id: uuid.UUID, skip: int = 0, limit: int = 100
-    ) -> Sequence[Order]:
+    ) -> Sequence[OrderEntity]:
         raise NotImplementedError
 
 
