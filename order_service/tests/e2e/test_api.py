@@ -21,7 +21,8 @@ async def test_create_order_endpoint(async_client: AsyncClient, db_session):
                 "quantity": 1,
                 "price": "300.00",
             },
-        ]
+        ],
+        "shipping_address": "Main Street 10",
     }
 
     response = await async_client.post(
@@ -37,6 +38,7 @@ async def test_create_order_endpoint(async_client: AsyncClient, db_session):
     assert data["user_id"] == custom_user_id
     assert data["status"] == "pending"
     assert data["total_amount"] == "3301.00"
+    assert data["shipping_address"] == "Main Street 10"
 
     assert len(data["items"]) == 2
     assert data["items"][0]["quantity"] == 2
@@ -51,13 +53,26 @@ async def test_create_order_endpoint(async_client: AsyncClient, db_session):
     payload_data = json.loads(events[0]["payload"])
     assert payload_data["total_amount"] == "3301.00"
     assert payload_data["user_id"] == custom_user_id
+    assert payload_data["shipping_address"] == "Main Street 10"
     assert "event_id" in payload_data
     assert "occurred_at" in payload_data
 
 
+async def test_missing_user_id_header_returns_422(async_client: AsyncClient):
+    payload = {
+        "items": [{"product_id": str(uuid.uuid4()), "quantity": 1, "price": "10.00"}]
+    }
+    response = await async_client.post("/orders/", json=payload)
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["header", "X-User-Id"]
+
+
 async def test_create_order_with_invalid_data_returns_422(async_client: AsyncClient):
+    user_id = str(uuid.uuid4())
     empty_items_payload = {"items": []}
-    response_empty = await async_client.post("/orders/", json=empty_items_payload)
+    response_empty = await async_client.post(
+        "/orders/", json=empty_items_payload, headers={"X-User-Id": user_id}
+    )
 
     assert response_empty.status_code == 422
     assert response_empty.json()["detail"][0]["type"] == "too_short"
@@ -65,7 +80,9 @@ async def test_create_order_with_invalid_data_returns_422(async_client: AsyncCli
     invalid_price_payload = {
         "items": [{"product_id": str(uuid.uuid4()), "quantity": 0, "price": "-50.00"}]
     }
-    response_invalid = await async_client.post("/orders/", json=invalid_price_payload)
+    response_invalid = await async_client.post(
+        "/orders/", json=invalid_price_payload, headers={"X-User-Id": user_id}
+    )
 
     assert response_invalid.status_code == 422
 
@@ -76,49 +93,75 @@ async def test_create_order_with_invalid_data_returns_422(async_client: AsyncCli
     assert "greater_than" in error_types
 
 
-async def test_get_order_list(async_client: AsyncClient):
+async def test_get_order_list_scoped_to_user(async_client: AsyncClient):
+    user_id_a = str(uuid.uuid4())
+    user_id_b = str(uuid.uuid4())
     payload = {
         "items": [{"product_id": str(uuid.uuid4()), "quantity": 1, "price": "100.00"}]
     }
-    await async_client.post("/orders/", json=payload)
-    await async_client.post("/orders/", json=payload)
+    await async_client.post("/orders/", json=payload, headers={"X-User-Id": user_id_a})
+    await async_client.post("/orders/", json=payload, headers={"X-User-Id": user_id_a})
+    await async_client.post("/orders/", json=payload, headers={"X-User-Id": user_id_b})
 
-    response = await async_client.get("/orders/?skip=0&limit=10")
+    response_a = await async_client.get(
+        "/orders/?skip=0&limit=10", headers={"X-User-Id": user_id_a}
+    )
+    assert response_a.status_code == 200
+    data_a = response_a.json()
+    assert len(data_a) == 2
+    assert all(order["user_id"] == user_id_a for order in data_a)
 
-    assert response.status_code == 200
-    data = response.json()
-    assert isinstance(data, list)
-    assert len(data) >= 2
+    response_b = await async_client.get(
+        "/orders/?skip=0&limit=10", headers={"X-User-Id": user_id_b}
+    )
+    assert response_b.status_code == 200
+    data_b = response_b.json()
+    assert len(data_b) == 1
+    assert data_b[0]["user_id"] == user_id_b
 
 
-async def test_get_single_order(async_client: AsyncClient):
+async def test_get_single_order_scoped_to_user(async_client: AsyncClient):
+    user_id_a = str(uuid.uuid4())
+    user_id_b = str(uuid.uuid4())
     payload = {
         "items": [{"product_id": str(uuid.uuid4()), "quantity": 2, "price": "50.00"}]
     }
-    create_resp = await async_client.post("/orders/", json=payload)
+    create_resp = await async_client.post(
+        "/orders/", json=payload, headers={"X-User-Id": user_id_a}
+    )
     order_id = create_resp.json()["id"]
 
-    get_resp = await async_client.get(f"/orders/{order_id}")
+    get_resp_a = await async_client.get(
+        f"/orders/{order_id}", headers={"X-User-Id": user_id_a}
+    )
+    assert get_resp_a.status_code == 200
+    assert get_resp_a.json()["id"] == order_id
+    assert get_resp_a.json()["status"] == OrderStatus.PENDING.value
 
-    assert get_resp.status_code == 200
-    assert get_resp.json()["id"] == order_id
-    assert get_resp.json()["status"] == OrderStatus.PENDING.value
+    get_resp_b = await async_client.get(
+        f"/orders/{order_id}", headers={"X-User-Id": user_id_b}
+    )
+    assert get_resp_b.status_code == 404
 
 
 async def test_get_non_existent_order_returns_404(async_client: AsyncClient):
     fake_id = str(uuid.uuid4())
-
-    response = await async_client.get(f"/orders/{fake_id}")
-
+    user_id = str(uuid.uuid4())
+    response = await async_client.get(
+        f"/orders/{fake_id}", headers={"X-User-Id": user_id}
+    )
     assert response.status_code == 404
     assert response.json()["detail"] == "Order not found"
 
 
 async def test_update_order_status(async_client: AsyncClient):
+    user_id = str(uuid.uuid4())
     payload = {
         "items": [{"product_id": str(uuid.uuid4()), "quantity": 1, "price": "10.00"}]
     }
-    create_resp = await async_client.post("/orders/", json=payload)
+    create_resp = await async_client.post(
+        "/orders/", json=payload, headers={"X-User-Id": user_id}
+    )
     order_id = create_resp.json()["id"]
 
     update_payload = {"status": OrderStatus.RESERVED.value}

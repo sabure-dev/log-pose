@@ -4,7 +4,7 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query, status
 
 from app.api.deps import OrderServiceDep, UserIdDep
-from app.api.schemas import OrderCreate, OrderRead, OrderStatusUpdate
+from app.schemas import OrderCreate, OrderRead, OrderStatusUpdate
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
@@ -26,18 +26,20 @@ async def create_order(
 @router.get("/", response_model=list[OrderRead], status_code=status.HTTP_200_OK)
 async def list_orders(
     service: OrderServiceDep,
+    current_user_id: UserIdDep,
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 100,
 ):
-    return await service.get_orders(skip, limit)
+    return await service.get_orders(current_user_id, skip, limit)
 
 
 @router.get("/{order_id}", response_model=OrderRead, status_code=status.HTTP_200_OK)
 async def get_order(
     order_id: uuid.UUID,
     service: OrderServiceDep,
+    current_user_id: UserIdDep,
 ):
-    order = await service.get_order(order_id)
+    order = await service.get_order(order_id, current_user_id)
     if not order:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Order not found"
@@ -53,7 +55,10 @@ async def update_order_status(
     update_data: OrderStatusUpdate,
     service: OrderServiceDep,
 ):
-    order = await service.update_order_status(order_id, update_data.status)
+    try:
+        order = await service.update_order_status(order_id, update_data.status)
+    except ValueError as err:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(err))
     if not order:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Order not found"

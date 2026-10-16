@@ -4,7 +4,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from app.api.schemas import OrderCreate, OrderItemCreate
+from app.schemas import OrderCreate, OrderItemCreate
 
 
 def test_valid_order_item_creation():
@@ -46,10 +46,10 @@ def test_duplicate_products_in_order_create():
         OrderCreate(
             items=[
                 OrderItemCreate(
-                    product_id=product_id, quantity=1, price=Decimal("10.00")
+                    product_id=product_id, quantity=1, price=Decimal("100.00")
                 ),
                 OrderItemCreate(
-                    product_id=product_id, quantity=2, price=Decimal("10.00")
+                    product_id=product_id, quantity=2, price=Decimal("100.00")
                 ),
             ]
         )
