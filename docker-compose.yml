@@ -10,6 +10,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
       ORDERS_DB_PASSWORD: ${ORDERS_DB_PASSWORD}
+      INVENTORY_DB_PASSWORD: ${INVENTORY_DB_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql
       - ./infra/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
@@ -46,9 +47,9 @@ services:
       - "8000:8000"
     depends_on:
       postgres:
-          condition: service_healthy
+        condition: service_healthy
       rabbitmq:
-          condition: service_healthy
+        condition: service_healthy
     env_file:
       - order_service/.env
     restart: on-failure
@@ -56,19 +57,49 @@ services:
       - logpose_net
 
   order_outbox_worker:
-      build: order_service/
-      container_name: logpose_outbox_worker
-      command: ["uv", "run", "python", "-m", "app.workers.outbox_relay"]
-      depends_on:
-        postgres:
-          condition: service_healthy
-        rabbitmq:
-          condition: service_healthy
-      env_file:
-        - order_service/.env
-      restart: always
-      networks:
-        - logpose_net
+    build: order_service/
+    container_name: logpose_outbox_worker
+    command: ["uv", "run", "python", "-m", "app.workers.outbox_relay"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    env_file:
+      - order_service/.env
+    restart: always
+    networks:
+      - logpose_net
+
+  order_inventory_worker:
+    build: order_service/
+    container_name: logpose_order_inventory_worker
+    command: ["uv", "run", "python", "-m", "app.workers.inventory_consumer"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    env_file:
+      - order_service/.env
+    restart: always
+    networks:
+      - logpose_net
+
+  inventory_service:
+    build: inventory_service/
+    container_name: logpose_inventory_service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgres://inventory_user:${INVENTORY_DB_PASSWORD}@postgres:5432/inventory_db?sslmode=disable"
+      RABBITMQ_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/"
+    restart: unless-stopped
+    networks:
+      - logpose_net
 
 networks:
   logpose_net:
