@@ -30,10 +30,6 @@ class OrderCreate(BaseModel):
         return items
 
 
-class OrderStatusUpdate(BaseModel):
-    status: OrderStatus
-
-
 class OrderItemRead(BaseModel):
     id: uuid.UUID
     product_id: uuid.UUID

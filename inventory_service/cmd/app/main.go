@@ -79,16 +79,12 @@ func run() error {
 	g, gCtx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
-		return orderConsumer.Start(gCtx)
+		return orderConsumer.Run(gCtx)
 	})
 
 	g.Go(func() error {
-		return outboxRelay.Start(gCtx)
+		return outboxRelay.Run(gCtx)
 	})
-
-	<-ctx.Done()
-	slog.Info("Shutting down Inventory Service, waiting for active jobs...")
-	orderConsumer.Wait()
 
 	if err := g.Wait(); err != nil && err != context.Canceled {
 		return fmt.Errorf("error during execution: %w", err)

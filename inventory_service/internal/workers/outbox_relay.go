@@ -20,7 +20,7 @@ func NewOutboxRelay(pool *pgxpool.Pool, ch *amqp.Channel) *OutboxRelay {
 	return &OutboxRelay{pool: pool, ch: ch}
 }
 
-func (r *OutboxRelay) Start(ctx context.Context) error {
+func (r *OutboxRelay) Run(ctx context.Context) error {
 	err := r.ch.ExchangeDeclare(
 		"logpose_events",
 		"topic",
@@ -32,6 +32,10 @@ func (r *OutboxRelay) Start(ctx context.Context) error {
 	)
 	if err != nil {
 		return fmt.Errorf("failed to declare exchange: %w", err)
+	}
+
+	if err := r.ch.Confirm(false); err != nil {
+		return fmt.Errorf("failed to enable publisher confirms: %w", err)
 	}
 
 	ticker := time.NewTicker(500 * time.Millisecond)
@@ -89,6 +93,9 @@ func (r *OutboxRelay) processBatch(ctx context.Context) error {
 		return nil
 	}
 
+	confirms := r.ch.NotifyPublish(make(chan amqp.Confirmation, len(events)))
+	returns := r.ch.NotifyReturn(make(chan amqp.Return, len(events)))
+
 	for _, e := range events {
 		err := r.ch.PublishWithContext(
 			ctx,
@@ -105,6 +112,19 @@ func (r *OutboxRelay) processBatch(ctx context.Context) error {
 		)
 		if err != nil {
 			return fmt.Errorf("failed to publish outbox event %s: %w", e.id, err)
+		}
+
+		select {
+		case ret := <-returns:
+			return fmt.Errorf("message %s returned by broker with reply %d: %s", e.id, ret.ReplyCode, ret.ReplyText)
+		case conf := <-confirms:
+			if !conf.Ack {
+				return fmt.Errorf("broker nacked message %s", e.id)
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+			return fmt.Errorf("timeout waiting for publish confirmation for %s", e.id)
 		}
 
 		_, err = tx.Exec(ctx, `

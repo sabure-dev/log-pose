@@ -7,6 +7,7 @@ from app.enums import OrderStatus
 from app.exceptions import InvalidTransition, OrderNotFound
 from app.interfaces import AbstractUnitOfWork
 from app.logging import correlation_id_ctx
+from app.models import Order
 from app.schemas import OrderCreate, OrderRead
 
 VALID_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
@@ -42,13 +43,13 @@ class OrderService:
                 "event_type": "OrderCreated",
                 "order_id": str(draft_order.id),
                 "user_id": str(user_id),
-                "total_amount": str(total_amount),
+                "total_amount": str(total_amount.quantize(Decimal("0.01"))),
                 "shipping_address": order_in.shipping_address,
                 "items": [
                     {
                         "product_id": str(item.product_id),
                         "quantity": item.quantity,
-                        "price": str(item.price),
+                        "price": str(item.price.quantize(Decimal("0.01"))),
                     }
                     for item in order_in.items
                 ],
@@ -79,6 +80,30 @@ class OrderService:
             orders = await self.uow.orders.get_all_by_user(user_id, skip, limit)
             return [OrderRead.model_validate(order) for order in orders]
 
+    async def _emit_cancelled(self, order: Order) -> None:
+        cancel_event_id = uuid.uuid4()
+        correlation_id = correlation_id_ctx.get() or str(uuid.uuid4())
+        cancel_payload = {
+            "event_id": str(cancel_event_id),
+            "correlation_id": correlation_id,
+            "event_type": "OrderCancelled",
+            "order_id": str(order.id),
+            "user_id": str(order.user_id),
+            "items": [
+                {
+                    "product_id": str(item.product_id),
+                    "quantity": item.quantity,
+                }
+                for item in order.items
+            ],
+            "occurred_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await self.uow.outbox.add(
+            topic="order.cancelled",
+            payload=cancel_payload,
+            event_id=cancel_event_id,
+        )
+
     async def cancel_order(self, order_id: uuid.UUID, user_id: uuid.UUID) -> OrderRead:
         async with self.uow:
             order = await self.uow.orders.get_for_update(order_id)
@@ -100,28 +125,7 @@ class OrderService:
             order.status = OrderStatus.CANCELLED.value
 
             if was_reserved:
-                cancel_event_id = uuid.uuid4()
-                correlation_id = correlation_id_ctx.get() or str(uuid.uuid4())
-                cancel_payload = {
-                    "event_id": str(cancel_event_id),
-                    "correlation_id": correlation_id,
-                    "event_type": "OrderCancelled",
-                    "order_id": str(order.id),
-                    "user_id": str(order.user_id),
-                    "items": [
-                        {
-                            "product_id": str(item.product_id),
-                            "quantity": item.quantity,
-                        }
-                        for item in order.items
-                    ],
-                    "occurred_at": datetime.now(timezone.utc).isoformat(),
-                }
-                await self.uow.outbox.add(
-                    topic="order.cancelled",
-                    payload=cancel_payload,
-                    event_id=cancel_event_id,
-                )
+                await self._emit_cancelled(order)
 
             await self.uow.commit()
             updated_order = await self.uow.orders.get(order_id)
@@ -149,28 +153,7 @@ class OrderService:
             order.status = status.value
 
             if status == OrderStatus.CANCELLED and was_reserved:
-                cancel_event_id = uuid.uuid4()
-                correlation_id = correlation_id_ctx.get() or str(uuid.uuid4())
-                cancel_payload = {
-                    "event_id": str(cancel_event_id),
-                    "correlation_id": correlation_id,
-                    "event_type": "OrderCancelled",
-                    "order_id": str(order.id),
-                    "user_id": str(order.user_id),
-                    "items": [
-                        {
-                            "product_id": str(item.product_id),
-                            "quantity": item.quantity,
-                        }
-                        for item in order.items
-                    ],
-                    "occurred_at": datetime.now(timezone.utc).isoformat(),
-                }
-                await self.uow.outbox.add(
-                    topic="order.cancelled",
-                    payload=cancel_payload,
-                    event_id=cancel_event_id,
-                )
+                await self._emit_cancelled(order)
 
             await self.uow.commit()
             updated_order = await self.uow.orders.get(order_id)
