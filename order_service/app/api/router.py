@@ -58,9 +58,7 @@ async def update_order_status(
     try:
         order = await service.update_order_status(order_id, update_data.status)
     except ValueError as err:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(err)
-        )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(err))
     if not order:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Order not found"

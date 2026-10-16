@@ -43,9 +43,7 @@ class Order(Base):
         Numeric(10, 2), nullable=False, default=Decimal("0.00")
     )
 
-    shipping_address: Mapped[str | None] = mapped_column(
-        String(500), nullable=True
-    )
+    shipping_address: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
