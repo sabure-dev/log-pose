@@ -89,7 +89,8 @@ class OrderService:
 
             if status not in VALID_TRANSITIONS.get(current_status, set()):
                 raise ValueError(
-                    f"Invalid status transition from {current_status.value} to {status.value}"
+                    f"Invalid status transition from {current_status.value} "
+                    f"to {status.value}"
                 )
 
             order.status = status.value
