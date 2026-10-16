@@ -7,7 +7,7 @@ import pytest
 
 from app.domain import NewOrderItem, OrderEntity, OrderItemEntity
 from app.enums import OrderStatus
-from app.exceptions import InvalidTransition, OrderNotFound
+from app.exceptions import InvalidTransition
 from app.interfaces import (
     AbstractOrderRepository,
     AbstractOutboxRepository,

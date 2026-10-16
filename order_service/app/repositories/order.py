@@ -59,7 +59,9 @@ class SqlAlchemyOrderRepository(AbstractOrderRepository):
         )
         self.session.add(new_order)
         await self.session.flush()
-        await self.session.refresh(new_order, attribute_names=["items", "created_at", "updated_at"])
+        await self.session.refresh(
+            new_order, attribute_names=["items", "created_at", "updated_at"]
+        )
         return _to_entity(new_order)
 
     async def get(self, order_id: uuid.UUID) -> OrderEntity | None:

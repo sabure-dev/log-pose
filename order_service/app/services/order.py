@@ -89,7 +89,9 @@ class OrderService:
             if current_status == OrderStatus.CANCELLED:
                 return order
 
-            if OrderStatus.CANCELLED not in VALID_TRANSITIONS.get(current_status, set()):
+            if OrderStatus.CANCELLED not in VALID_TRANSITIONS.get(
+                current_status, set()
+            ):
                 raise InvalidTransition(
                     f"Cannot cancel order with status {current_status.value}"
                 )
@@ -121,7 +123,8 @@ class OrderService:
 
             if status not in VALID_TRANSITIONS.get(current_status, set()):
                 raise InvalidTransition(
-                    f"Invalid status transition from {current_status.value} to {status.value}"
+                    f"Invalid status transition from "
+                    f"{current_status.value} to {status.value}"
                 )
 
             updated_order = await self.uow.orders.update_status(order_id, status)
