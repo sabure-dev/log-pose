@@ -4,8 +4,8 @@ from decimal import Decimal
 
 from sqlalchemy import text
 
-from app.api.schemas import OrderItemCreate
 from app.repositories.uow import SqlAlchemyUnitOfWork
+from app.schemas import OrderItemCreate
 
 
 async def test_uow_can_save_order_and_outbox_event_atomically(db_session):
