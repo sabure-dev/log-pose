@@ -15,9 +15,7 @@ class JsonFormatter(logging.Formatter):
             "level": record.levelname,
             "name": record.name,
             "message": record.getMessage(),
-            "correlation_id": getattr(
-                record, "correlation_id", None
-            )
+            "correlation_id": getattr(record, "correlation_id", None)
             or correlation_id_ctx.get(),
         }
         if record.exc_info:

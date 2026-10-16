@@ -79,9 +79,7 @@ class OrderService:
             orders = await self.uow.orders.get_all_by_user(user_id, skip, limit)
             return [OrderRead.model_validate(order) for order in orders]
 
-    async def cancel_order(
-        self, order_id: uuid.UUID, user_id: uuid.UUID
-    ) -> OrderRead:
+    async def cancel_order(self, order_id: uuid.UUID, user_id: uuid.UUID) -> OrderRead:
         async with self.uow:
             order = await self.uow.orders.get_for_update(order_id)
             if not order or order.user_id != user_id:
@@ -91,7 +89,9 @@ class OrderService:
             if current_status == OrderStatus.CANCELLED:
                 return OrderRead.model_validate(order)
 
-            if OrderStatus.CANCELLED not in VALID_TRANSITIONS.get(current_status, set()):
+            if OrderStatus.CANCELLED not in VALID_TRANSITIONS.get(
+                current_status, set()
+            ):
                 raise InvalidTransition(
                     f"Cannot cancel order with status {current_status.value}"
                 )
@@ -141,7 +141,8 @@ class OrderService:
 
             if status not in VALID_TRANSITIONS.get(current_status, set()):
                 raise InvalidTransition(
-                    f"Invalid status transition from {current_status.value} to {status.value}"
+                    f"Invalid status transition from "
+                    f"{current_status.value} to {status.value}"
                 )
 
             was_reserved = current_status == OrderStatus.RESERVED

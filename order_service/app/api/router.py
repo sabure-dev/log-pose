@@ -63,6 +63,4 @@ async def cancel_order(
             status_code=status.HTTP_404_NOT_FOUND, detail="Order not found"
         )
     except InvalidTransition as err:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(err)
-        )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(err))

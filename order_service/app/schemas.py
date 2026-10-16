@@ -20,9 +20,7 @@ class OrderCreate(BaseModel):
 
     @field_validator("items")
     @classmethod
-    def validate_items(
-        cls, items: list[OrderItemCreate]
-    ) -> list[OrderItemCreate]:
+    def validate_items(cls, items: list[OrderItemCreate]) -> list[OrderItemCreate]:
         product_ids = [item.product_id for item in items]
         if len(product_ids) != len(set(product_ids)):
             raise ValueError("Duplicate product_id found in items")
