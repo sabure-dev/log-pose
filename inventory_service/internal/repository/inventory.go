@@ -1,12 +1,15 @@
 package repository
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"inventory_service/internal/domain"
 )
@@ -14,7 +17,14 @@ import (
 var (
 	ErrAlreadyProcessed = errors.New("event already processed")
 	ErrOutOfStock       = errors.New("insufficient stock")
+	ErrInvalidQuantity  = errors.New("quantity must be greater than zero")
+	ErrPriceMismatch    = errors.New("item price does not match catalog")
 )
+
+type Reserver interface {
+	Reserve(ctx context.Context, event domain.OrderCreatedEvent) error
+	Release(ctx context.Context, event domain.OrderCancelledEvent) error
+}
 
 type InventoryRepository struct {
 	pool *pgxpool.Pool
@@ -24,92 +34,197 @@ func NewInventoryRepository(pool *pgxpool.Pool) *InventoryRepository {
 	return &InventoryRepository{pool: pool}
 }
 
-func (r *InventoryRepository) ReserveItems(ctx context.Context, eventID uuid.UUID, items []domain.OrderItemPayload) error {
+func (r *InventoryRepository) Reserve(ctx context.Context, event domain.OrderCreatedEvent) error {
+	for _, item := range event.Items {
+		if item.Quantity <= 0 {
+			return ErrInvalidQuantity
+		}
+	}
+
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	var exists bool
-	err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM inbox_events WHERE event_id = $1)", eventID).Scan(&exists)
+	itemsJSON, err := json.Marshal(event.Items)
 	if err != nil {
-		return fmt.Errorf("inbox check failed: %w", err)
+		return fmt.Errorf("failed to marshal items: %w", err)
 	}
-	if exists {
+
+	cmdTag, err := tx.Exec(ctx, `
+		INSERT INTO reservations (order_id, status, items)
+		VALUES ($1, 'RESERVED', $2)
+		ON CONFLICT (order_id) DO NOTHING
+	`, event.OrderID, itemsJSON)
+	if err != nil {
+		return fmt.Errorf("failed to insert reservation: %w", err)
+	}
+	if cmdTag.RowsAffected() == 0 {
 		return ErrAlreadyProcessed
 	}
 
-	sortedItems := make([]domain.OrderItemPayload, len(items))
-	copy(sortedItems, items)
-	sort.Slice(sortedItems, func(i, j int) bool {
-		return sortedItems[i].ProductID.String() < sortedItems[j].ProductID.String()
-	})
-
-	for _, item := range sortedItems {
-		cmdTag, err := tx.Exec(ctx, `
-			UPDATE inventory_stocks 
-			SET stock = stock - $1, 
-			    reserved = reserved + $1,
-			    updated_at = NOW()
-			WHERE product_id = $2 AND stock >= $1
-		`, item.Quantity, item.ProductID)
-
-		if err != nil {
-			return fmt.Errorf("stock update error for %s: %w", item.ProductID, err)
-		}
-		if cmdTag.RowsAffected() == 0 {
-			return fmt.Errorf("%w for product %s", ErrOutOfStock, item.ProductID)
+	for _, item := range event.Items {
+		if item.Price != "" {
+			var catalogPrice string
+			err := tx.QueryRow(ctx, "SELECT price::text FROM products WHERE id = $1", item.ProductID).Scan(&catalogPrice)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return r.failReservation(ctx, tx, event, "product not found in catalog")
+				}
+				return fmt.Errorf("failed to check price for %s: %w", item.ProductID, err)
+			}
+			if catalogPrice != item.Price {
+				return r.failReservation(ctx, tx, event, fmt.Sprintf("price mismatch for %s", item.ProductID))
+			}
 		}
 	}
 
-	_, err = tx.Exec(ctx, "INSERT INTO inbox_events (event_id, event_type) VALUES ($1, $2)", eventID, "OrderCreated")
+	sortedItems := make([]domain.OrderItemPayload, len(event.Items))
+	copy(sortedItems, event.Items)
+	slices.SortFunc(sortedItems, func(a, b domain.OrderItemPayload) int {
+		return bytes.Compare(a.ProductID[:], b.ProductID[:])
+	})
+
+	for _, item := range sortedItems {
+		var available int
+		err := tx.QueryRow(ctx, `
+			SELECT available
+			FROM inventory_stocks
+			WHERE product_id = $1
+			FOR UPDATE
+		`, item.ProductID).Scan(&available)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return r.failReservation(ctx, tx, event, "item not found in inventory")
+			}
+			return fmt.Errorf("failed to lock inventory row: %w", err)
+		}
+		if available < item.Quantity {
+			return r.failReservation(ctx, tx, event, "insufficient stock")
+		}
+	}
+
+	for _, item := range sortedItems {
+		_, err := tx.Exec(ctx, `
+			UPDATE inventory_stocks
+			SET available = available - $1,
+			    reserved = reserved + $1,
+			    updated_at = NOW()
+			WHERE product_id = $2
+		`, item.Quantity, item.ProductID)
+		if err != nil {
+			return fmt.Errorf("stock update error for %s: %w", item.ProductID, err)
+		}
+	}
+
+	reservedEvent := domain.InventoryReservedEvent{
+		EventID:       uuid.New(),
+		CorrelationID: event.CorrelationID,
+		EventType:     "InventoryReservationResult",
+		OrderID:       event.OrderID,
+		Status:        "RESERVED",
+	}
+	payloadBytes, err := json.Marshal(reservedEvent)
 	if err != nil {
-		return fmt.Errorf("failed to record inbox event: %w", err)
+		return fmt.Errorf("failed to marshal outbox event: %w", err)
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO outbox_events (id, topic, payload)
+		VALUES ($1, 'inventory.reserved', $2)
+	`, reservedEvent.EventID, payloadBytes)
+	if err != nil {
+		return fmt.Errorf("failed to insert outbox event: %w", err)
 	}
 
 	return tx.Commit(ctx)
 }
 
-func (r *InventoryRepository) ReleaseItems(ctx context.Context, eventID uuid.UUID, items []domain.OrderItemPayload) error {
+func (r *InventoryRepository) failReservation(
+	ctx context.Context,
+	tx pgx.Tx,
+	event domain.OrderCreatedEvent,
+	reason string,
+) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE reservations
+		SET status = 'FAILED', updated_at = NOW()
+		WHERE order_id = $1
+	`, event.OrderID)
+	if err != nil {
+		return fmt.Errorf("failed to mark reservation as failed: %w", err)
+	}
+
+	failedEvent := domain.InventoryReservedEvent{
+		EventID:       uuid.New(),
+		CorrelationID: event.CorrelationID,
+		EventType:     "InventoryReservationResult",
+		OrderID:       event.OrderID,
+		Status:        "FAILED",
+		Reason:        reason,
+	}
+	payloadBytes, err := json.Marshal(failedEvent)
+	if err != nil {
+		return fmt.Errorf("failed to marshal failed outbox event: %w", err)
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO outbox_events (id, topic, payload)
+		VALUES ($1, 'inventory.failed', $2)
+	`, failedEvent.EventID, payloadBytes)
+	if err != nil {
+		return fmt.Errorf("failed to insert failed outbox event: %w", err)
+	}
+
+	if commitErr := tx.Commit(ctx); commitErr != nil {
+		return fmt.Errorf("failed to commit failed reservation: %w", commitErr)
+	}
+
+	return ErrOutOfStock
+}
+
+func (r *InventoryRepository) Release(ctx context.Context, event domain.OrderCancelledEvent) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	var exists bool
-	err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM inbox_events WHERE event_id = $1)", eventID).Scan(&exists)
+	var itemsJSON []byte
+	err = tx.QueryRow(ctx, `
+		UPDATE reservations
+		SET status = 'RELEASED', updated_at = NOW()
+		WHERE order_id = $1 AND status = 'RESERVED'
+		RETURNING items
+	`, event.OrderID).Scan(&itemsJSON)
 	if err != nil {
-		return fmt.Errorf("inbox check failed: %w", err)
-	}
-	if exists {
-		return ErrAlreadyProcessed
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("failed to update reservation status: %w", err)
 	}
 
-	sortedItems := make([]domain.OrderItemPayload, len(items))
-	copy(sortedItems, items)
-	sort.Slice(sortedItems, func(i, j int) bool {
-		return sortedItems[i].ProductID.String() < sortedItems[j].ProductID.String()
+	var reservedItems []domain.OrderItemPayload
+	if err := json.Unmarshal(itemsJSON, &reservedItems); err != nil {
+		return fmt.Errorf("failed to unmarshal reserved items: %w", err)
+	}
+
+	slices.SortFunc(reservedItems, func(a, b domain.OrderItemPayload) int {
+		return bytes.Compare(a.ProductID[:], b.ProductID[:])
 	})
 
-	for _, item := range sortedItems {
+	for _, item := range reservedItems {
 		_, err := tx.Exec(ctx, `
-			UPDATE inventory_stocks 
-			SET stock = stock + $1, 
+			UPDATE inventory_stocks
+			SET available = available + $1,
 			    reserved = GREATEST(0, reserved - $1),
 			    updated_at = NOW()
 			WHERE product_id = $2
 		`, item.Quantity, item.ProductID)
-
 		if err != nil {
-			return fmt.Errorf("stock release error for %s: %w", item.ProductID, err)
+			return fmt.Errorf("failed to restore stock for %s: %w", item.ProductID, err)
 		}
-	}
-
-	_, err = tx.Exec(ctx, "INSERT INTO inbox_events (event_id, event_type) VALUES ($1, $2)", eventID, "OrderCancelled")
-	if err != nil {
-		return fmt.Errorf("failed to record inbox event: %w", err)
 	}
 
 	return tx.Commit(ctx)

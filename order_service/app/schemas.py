@@ -20,12 +20,13 @@ class OrderCreate(BaseModel):
 
     @field_validator("items")
     @classmethod
-    def validate_unique_products(
-        cls, items: list[OrderItemCreate]
-    ) -> list[OrderItemCreate]:
+    def validate_items(cls, items: list[OrderItemCreate]) -> list[OrderItemCreate]:
         product_ids = [item.product_id for item in items]
         if len(product_ids) != len(set(product_ids)):
             raise ValueError("Duplicate product_id found in items")
+        total = sum((item.price * item.quantity for item in items), Decimal("0.00"))
+        if total >= Decimal("100000000.00"):
+            raise ValueError("Total order amount exceeds limit")
         return items
 
 

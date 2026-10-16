@@ -1,0 +1,7 @@
+{
+  "event_id": "1fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "correlation_id": "c0a80101-0000-0000-0000-000000000001",
+  "event_type": "InventoryReservationResult",
+  "order_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "status": "RESERVED"
+}

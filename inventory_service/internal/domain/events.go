@@ -10,6 +10,7 @@ type OrderItemPayload struct {
 
 type OrderCreatedEvent struct {
 	EventID         uuid.UUID          `json:"event_id"`
+	CorrelationID   string             `json:"correlation_id,omitempty"`
 	EventType       string             `json:"event_type"`
 	OrderID         uuid.UUID          `json:"order_id"`
 	UserID          uuid.UUID          `json:"user_id"`
@@ -20,18 +21,20 @@ type OrderCreatedEvent struct {
 }
 
 type OrderCancelledEvent struct {
-	EventID    uuid.UUID          `json:"event_id"`
-	EventType  string             `json:"event_type"`
-	OrderID    uuid.UUID          `json:"order_id"`
-	UserID     uuid.UUID          `json:"user_id"`
-	Items      []OrderItemPayload `json:"items"`
-	OccurredAt string             `json:"occurred_at"`
+	EventID       uuid.UUID          `json:"event_id"`
+	CorrelationID string             `json:"correlation_id,omitempty"`
+	EventType     string             `json:"event_type"`
+	OrderID       uuid.UUID          `json:"order_id"`
+	UserID        uuid.UUID          `json:"user_id"`
+	Items         []OrderItemPayload `json:"items"`
+	OccurredAt    string             `json:"occurred_at"`
 }
 
 type InventoryReservedEvent struct {
-	EventID   uuid.UUID `json:"event_id"`
-	EventType string    `json:"event_type"`
-	OrderID   uuid.UUID `json:"order_id"`
-	Status    string    `json:"status"`
-	Reason    string    `json:"reason,omitempty"`
+	EventID       uuid.UUID `json:"event_id"`
+	CorrelationID string    `json:"correlation_id,omitempty"`
+	EventType     string    `json:"event_type"`
+	OrderID       uuid.UUID `json:"order_id"`
+	Status        string    `json:"status"`
+	Reason        string    `json:"reason,omitempty"`
 }

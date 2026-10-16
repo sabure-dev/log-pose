@@ -6,6 +6,7 @@ from typing import Sequence
 import pytest
 
 from app.enums import OrderStatus
+from app.exceptions import InvalidTransition, OrderNotFound
 from app.interfaces import (
     AbstractOrderRepository,
     AbstractOutboxRepository,
@@ -55,6 +56,9 @@ class FakeOrderRepository(AbstractOrderRepository):
         return new_order
 
     async def get(self, order_id: uuid.UUID) -> Order | None:
+        return self.orders.get(order_id)
+
+    async def get_for_update(self, order_id: uuid.UUID) -> Order | None:
         return self.orders.get(order_id)
 
     async def get_by_id_and_user(
@@ -177,6 +181,7 @@ async def test_update_order_status_to_cancelled_publishes_outbox_event():
     user_id = uuid.uuid4()
 
     draft_order = await uow.orders.add(user_id, Decimal("100.00"), [])
+    await service.update_order_status(draft_order.id, OrderStatus.RESERVED)
 
     updated_order = await service.update_order_status(
         draft_order.id, OrderStatus.CANCELLED
@@ -193,6 +198,22 @@ async def test_update_order_status_to_cancelled_publishes_outbox_event():
     assert cancel_payload["event_type"] == "OrderCancelled"
 
 
+async def test_cancel_order_scoped_to_user():
+    uow = FakeUnitOfWork()
+    service = OrderService(uow=uow)
+    user_id = uuid.uuid4()
+    other_user_id = uuid.uuid4()
+
+    draft_order = await uow.orders.add(user_id, Decimal("100.00"), [])
+    await service.update_order_status(draft_order.id, OrderStatus.RESERVED)
+
+    cancelled_order = await service.cancel_order(draft_order.id, user_id=user_id)
+    assert cancelled_order.status == OrderStatus.CANCELLED
+
+    with pytest.raises(OrderNotFound):
+        await service.cancel_order(draft_order.id, user_id=other_user_id)
+
+
 async def test_invalid_status_transition_raises_error():
     uow = FakeUnitOfWork()
     service = OrderService(uow=uow)
@@ -201,7 +222,7 @@ async def test_invalid_status_transition_raises_error():
     draft_order = await uow.orders.add(user_id, Decimal("100.00"), [])
     await service.update_order_status(draft_order.id, OrderStatus.CANCELLED)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(InvalidTransition):
         await service.update_order_status(draft_order.id, OrderStatus.RESERVED)
 
 
