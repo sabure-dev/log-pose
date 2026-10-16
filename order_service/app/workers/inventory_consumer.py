@@ -50,7 +50,8 @@ async def handle_inventory_message(
                 )
                 if updated_order:
                     logger.info(
-                        f"Order {order_id} status updated to {target_status.value} from {message.routing_key}"
+                        f"Order {order_id} status updated to {target_status.value} "
+                        f"from {message.routing_key}"
                     )
                 else:
                     logger.warning(f"Order {order_id} not found")
