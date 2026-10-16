@@ -24,7 +24,7 @@ func NewOrderConsumer(ch *amqp.Channel, reserver repository.Reserver) *OrderCons
 	return &OrderConsumer{ch: ch, reserver: reserver}
 }
 
-func (c *OrderConsumer) Start(ctx context.Context) error {
+func (c *OrderConsumer) Run(ctx context.Context) error {
 	err := c.ch.ExchangeDeclare(
 		"logpose_events",
 		"topic",
@@ -81,30 +81,29 @@ func (c *OrderConsumer) Start(ctx context.Context) error {
 	}
 
 	notifyClose := c.ch.NotifyClose(make(chan *amqp.Error, 1))
-
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case amqpErr, ok := <-notifyClose:
-				if ok && amqpErr != nil {
-					slog.Error("AMQP channel closed unexpectedly", "error", amqpErr)
-				}
-				return
-			case d, ok := <-msgs:
-				if !ok {
-					return
-				}
-				c.handleDelivery(ctx, d)
-			}
-		}
-	}()
-
 	slog.Info("OrderConsumer started", "queue", q.Name)
-	return nil
+
+	for {
+		select {
+		case <-ctx.Done():
+			c.wg.Wait()
+			return ctx.Err()
+		case amqpErr, ok := <-notifyClose:
+			if ok && amqpErr != nil {
+				return fmt.Errorf("amqp channel closed: %w", amqpErr)
+			}
+			return fmt.Errorf("amqp channel closed")
+		case d, ok := <-msgs:
+			if !ok {
+				return fmt.Errorf("amqp delivery channel closed")
+			}
+			c.wg.Add(1)
+			go func(delivery amqp.Delivery) {
+				defer c.wg.Done()
+				c.handleDelivery(ctx, delivery)
+			}(d)
+		}
+	}
 }
 
 func (c *OrderConsumer) Wait() {
@@ -141,7 +140,7 @@ func (c *OrderConsumer) handleOrderCreated(ctx context.Context, d amqp.Delivery)
 			_ = d.Ack(false)
 			return
 		}
-		if errors.Is(err, repository.ErrOutOfStock) || errors.Is(err, repository.ErrInvalidQuantity) || errors.Is(err, repository.ErrPriceMismatch) {
+		if errors.Is(err, repository.ErrOutOfStock) || errors.Is(err, repository.ErrInvalidQuantity) {
 			slog.Warn("Order rejected by inventory rules", "order_id", event.OrderID, "error", err)
 			_ = d.Ack(false)
 			return
