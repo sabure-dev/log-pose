@@ -11,12 +11,12 @@ from app.enums import OrderStatus
 class OrderItemCreate(BaseModel):
     product_id: uuid.UUID
     quantity: Annotated[int, Field(ge=1, le=10000)] = 1
-    # TODO: remove price from DTO once inventory/catalog service provides pricing
     price: Annotated[Decimal, Field(gt=0, max_digits=10, decimal_places=2)]
 
 
 class OrderCreate(BaseModel):
     items: Annotated[list[OrderItemCreate], Field(min_length=1)]
+    shipping_address: Annotated[str | None, Field(max_length=500)] = None
 
     @field_validator("items")
     @classmethod
@@ -47,6 +47,7 @@ class OrderRead(BaseModel):
     user_id: uuid.UUID
     status: OrderStatus
     total_amount: Decimal
+    shipping_address: str | None = None
     created_at: datetime
     updated_at: datetime
     items: list[OrderItemRead]
