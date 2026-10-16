@@ -12,16 +12,18 @@ class DummyMessage:
     def __init__(self, body: bytes, routing_key: str):
         self.body = body
         self.routing_key = routing_key
+        self.acked = False
+        self.rejected = False
+        self.nacked = False
 
-    def process(self, requeue: bool = False):
-        class DummyContext:
-            async def __aenter__(self):
-                return self
+    async def ack(self):
+        self.acked = True
 
-            async def __aexit__(self, exc_type, exc_val, exc_tb):
-                pass
+    async def reject(self, requeue: bool = False):
+        self.rejected = True
 
-        return DummyContext()
+    async def nack(self, requeue: bool = True):
+        self.nacked = True
 
 
 @pytest.mark.asyncio
@@ -61,6 +63,7 @@ async def test_handle_inventory_reserved_updates_order_status(db_session):
 
     await db_session.refresh(order)
     assert order.status == OrderStatus.RESERVED.value
+    assert msg.acked is True
 
 
 @pytest.mark.asyncio
@@ -101,3 +104,28 @@ async def test_handle_inventory_failed_cancels_order(db_session):
 
     await db_session.refresh(order)
     assert order.status == OrderStatus.CANCELLED.value
+    assert msg.acked is True
+
+
+@pytest.mark.asyncio
+async def test_handle_inventory_malformed_message_rejects():
+    msg = DummyMessage(
+        body=b"invalid json",
+        routing_key="inventory.reserved",
+    )
+    await handle_inventory_message(msg, None)
+    assert msg.rejected is True
+
+
+@pytest.mark.asyncio
+async def test_handle_inventory_unknown_status_rejects():
+    payload = {
+        "order_id": str(uuid.uuid4()),
+        "status": "UNKNOWN_STATUS",
+    }
+    msg = DummyMessage(
+        body=json.dumps(payload).encode("utf-8"),
+        routing_key="inventory.reserved",
+    )
+    await handle_inventory_message(msg, None)
+    assert msg.rejected is True

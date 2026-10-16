@@ -23,6 +23,10 @@ class AbstractOrderRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def get_for_update(self, order_id: uuid.UUID) -> Order | None:
+        raise NotImplementedError
+
+    @abstractmethod
     async def get_by_id_and_user(
         self, order_id: uuid.UUID, user_id: uuid.UUID
     ) -> Order | None:

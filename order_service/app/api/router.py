@@ -4,7 +4,8 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query, status
 
 from app.api.deps import OrderServiceDep, UserIdDep
-from app.schemas import OrderCreate, OrderRead, OrderStatusUpdate
+from app.exceptions import InvalidTransition, OrderNotFound
+from app.schemas import OrderCreate, OrderRead
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
@@ -47,20 +48,21 @@ async def get_order(
     return order
 
 
-@router.patch(
-    "/{order_id}/status", response_model=OrderRead, status_code=status.HTTP_200_OK
+@router.post(
+    "/{order_id}/cancel", response_model=OrderRead, status_code=status.HTTP_200_OK
 )
-async def update_order_status(
+async def cancel_order(
     order_id: uuid.UUID,
-    update_data: OrderStatusUpdate,
     service: OrderServiceDep,
+    current_user_id: UserIdDep,
 ):
     try:
-        order = await service.update_order_status(order_id, update_data.status)
-    except ValueError as err:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(err))
-    if not order:
+        return await service.cancel_order(order_id, current_user_id)
+    except OrderNotFound:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Order not found"
         )
-    return order
+    except InvalidTransition as err:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(err)
+        )

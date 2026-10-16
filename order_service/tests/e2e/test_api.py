@@ -1,5 +1,6 @@
 import json
 import uuid
+from pathlib import Path
 
 from httpx import AsyncClient
 from sqlalchemy import text
@@ -56,6 +57,7 @@ async def test_create_order_endpoint(async_client: AsyncClient, db_session):
     assert payload_data["shipping_address"] == "Main Street 10"
     assert "event_id" in payload_data
     assert "occurred_at" in payload_data
+    assert "correlation_id" in payload_data
 
 
 async def test_missing_user_id_header_returns_422(async_client: AsyncClient):
@@ -154,7 +156,7 @@ async def test_get_non_existent_order_returns_404(async_client: AsyncClient):
     assert response.json()["detail"] == "Order not found"
 
 
-async def test_update_order_status(async_client: AsyncClient):
+async def test_cancel_order_endpoint(async_client: AsyncClient):
     user_id = str(uuid.uuid4())
     payload = {
         "items": [{"product_id": str(uuid.uuid4()), "quantity": 1, "price": "10.00"}]
@@ -164,21 +166,42 @@ async def test_update_order_status(async_client: AsyncClient):
     )
     order_id = create_resp.json()["id"]
 
-    update_payload = {"status": OrderStatus.RESERVED.value}
-    patch_resp = await async_client.patch(
-        f"/orders/{order_id}/status", json=update_payload
+    cancel_resp = await async_client.post(
+        f"/orders/{order_id}/cancel", headers={"X-User-Id": user_id}
     )
 
-    assert patch_resp.status_code == 200
-    assert patch_resp.json()["status"] == OrderStatus.RESERVED.value
+    assert cancel_resp.status_code == 200
+    assert cancel_resp.json()["status"] == OrderStatus.CANCELLED.value
 
 
-async def test_update_status_with_invalid_enum(async_client: AsyncClient):
-    fake_id = str(uuid.uuid4())
-    update_payload = {"status": "random_wrong_status"}
-
-    response = await async_client.patch(
-        f"/orders/{fake_id}/status", json=update_payload
+async def test_cancel_other_users_order_returns_404(async_client: AsyncClient):
+    user_id_a = str(uuid.uuid4())
+    user_id_b = str(uuid.uuid4())
+    payload = {
+        "items": [{"product_id": str(uuid.uuid4()), "quantity": 1, "price": "10.00"}]
+    }
+    create_resp = await async_client.post(
+        "/orders/", json=payload, headers={"X-User-Id": user_id_a}
     )
+    order_id = create_resp.json()["id"]
 
-    assert response.status_code == 422
+    cancel_resp = await async_client.post(
+        f"/orders/{order_id}/cancel", headers={"X-User-Id": user_id_b}
+    )
+    assert cancel_resp.status_code == 404
+
+
+async def test_contracts_schema_matches_order_created():
+    contract_path = (
+        Path(__file__).parent.parent.parent.parent
+        / "docs"
+        / "contracts"
+        / "order_created.json"
+    )
+    with open(contract_path) as f:
+        data = json.load(f)
+    assert data["event_type"] == "OrderCreated"
+    assert "event_id" in data
+    assert "correlation_id" in data
+    assert "total_amount" in data
+    assert "items" in data

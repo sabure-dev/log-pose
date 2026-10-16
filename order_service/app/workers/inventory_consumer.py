@@ -9,6 +9,7 @@ from aio_pika.abc import AbstractIncomingMessage
 from app.config import settings
 from app.database import async_session_maker
 from app.enums import OrderStatus
+from app.exceptions import DomainError
 from app.repositories.uow import SqlAlchemyUnitOfWork
 from app.services.order import OrderService
 
@@ -18,45 +19,43 @@ logger = logging.getLogger(__name__)
 async def handle_inventory_message(
     message: AbstractIncomingMessage, session_factory
 ) -> None:
-    async with message.process(requeue=False):
-        try:
-            payload = json.loads(message.body.decode("utf-8"))
-        except Exception as exc:
-            logger.error(f"Failed to decode message: {exc}")
-            return
+    try:
+        payload = json.loads(message.body.decode("utf-8"))
+    except Exception as exc:
+        logger.error(f"Malformed json payload: {exc}")
+        await message.reject(requeue=False)
+        return
 
-        order_id_raw = payload.get("order_id")
-        status_raw = payload.get("status")
-        if not order_id_raw or not status_raw:
-            logger.warning(f"Malformed message payload: {payload}")
-            return
+    order_id_raw = payload.get("order_id")
+    status_raw = payload.get("status")
+    if not order_id_raw or status_raw not in ("RESERVED", "FAILED"):
+        logger.warning(f"Unprocessable payload or status: {payload}")
+        await message.reject(requeue=False)
+        return
 
-        try:
-            order_id = uuid.UUID(order_id_raw)
-        except ValueError:
-            logger.error(f"Invalid UUID for order_id: {order_id_raw}")
-            return
+    try:
+        order_id = uuid.UUID(order_id_raw)
+    except ValueError:
+        logger.error(f"Invalid UUID: {order_id_raw}")
+        await message.reject(requeue=False)
+        return
 
-        target_status = (
-            OrderStatus.RESERVED if status_raw == "RESERVED" else OrderStatus.CANCELLED
-        )
+    target_status = (
+        OrderStatus.RESERVED if status_raw == "RESERVED" else OrderStatus.CANCELLED
+    )
 
+    try:
         async with session_factory() as session:
             uow = SqlAlchemyUnitOfWork(session=session)
             service = OrderService(uow=uow)
             try:
-                updated_order = await service.update_order_status(
-                    order_id, target_status
-                )
-                if updated_order:
-                    logger.info(
-                        f"Order {order_id} status updated to {target_status.value} "
-                        f"from {message.routing_key}"
-                    )
-                else:
-                    logger.warning(f"Order {order_id} not found")
-            except ValueError as val_err:
-                logger.warning(f"Order {order_id} transition rejected: {val_err}")
+                await service.update_order_status(order_id, target_status)
+            except DomainError as domain_err:
+                logger.warning(f"Domain transition rejected: {domain_err}")
+        await message.ack()
+    except Exception as db_err:
+        logger.error(f"Database error in inventory consumer: {db_err}")
+        await message.nack(requeue=True)
 
 
 async def run_inventory_consumer() -> None:

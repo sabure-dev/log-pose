@@ -4,7 +4,9 @@ from decimal import Decimal
 from typing import Sequence
 
 from app.enums import OrderStatus
+from app.exceptions import InvalidTransition, OrderNotFound
 from app.interfaces import AbstractUnitOfWork
+from app.logging import correlation_id_ctx
 from app.schemas import OrderCreate, OrderRead
 
 VALID_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
@@ -33,8 +35,10 @@ class OrderService:
             )
 
             event_id = uuid.uuid4()
+            correlation_id = correlation_id_ctx.get() or str(uuid.uuid4())
             event_payload = {
                 "event_id": str(event_id),
+                "correlation_id": correlation_id,
                 "event_type": "OrderCreated",
                 "order_id": str(draft_order.id),
                 "user_id": str(user_id),
@@ -75,11 +79,59 @@ class OrderService:
             orders = await self.uow.orders.get_all_by_user(user_id, skip, limit)
             return [OrderRead.model_validate(order) for order in orders]
 
+    async def cancel_order(
+        self, order_id: uuid.UUID, user_id: uuid.UUID
+    ) -> OrderRead:
+        async with self.uow:
+            order = await self.uow.orders.get_for_update(order_id)
+            if not order or order.user_id != user_id:
+                raise OrderNotFound(f"Order {order_id} not found")
+
+            current_status = OrderStatus(order.status)
+            if current_status == OrderStatus.CANCELLED:
+                return OrderRead.model_validate(order)
+
+            if OrderStatus.CANCELLED not in VALID_TRANSITIONS.get(current_status, set()):
+                raise InvalidTransition(
+                    f"Cannot cancel order with status {current_status.value}"
+                )
+
+            was_reserved = current_status == OrderStatus.RESERVED
+            order.status = OrderStatus.CANCELLED.value
+
+            if was_reserved:
+                cancel_event_id = uuid.uuid4()
+                correlation_id = correlation_id_ctx.get() or str(uuid.uuid4())
+                cancel_payload = {
+                    "event_id": str(cancel_event_id),
+                    "correlation_id": correlation_id,
+                    "event_type": "OrderCancelled",
+                    "order_id": str(order.id),
+                    "user_id": str(order.user_id),
+                    "items": [
+                        {
+                            "product_id": str(item.product_id),
+                            "quantity": item.quantity,
+                        }
+                        for item in order.items
+                    ],
+                    "occurred_at": datetime.now(timezone.utc).isoformat(),
+                }
+                await self.uow.outbox.add(
+                    topic="order.cancelled",
+                    payload=cancel_payload,
+                    event_id=cancel_event_id,
+                )
+
+            await self.uow.commit()
+            updated_order = await self.uow.orders.get(order_id)
+            return OrderRead.model_validate(updated_order)
+
     async def update_order_status(
         self, order_id: uuid.UUID, status: OrderStatus
     ) -> OrderRead | None:
         async with self.uow:
-            order = await self.uow.orders.get(order_id)
+            order = await self.uow.orders.get_for_update(order_id)
             if not order:
                 return None
 
@@ -88,17 +140,19 @@ class OrderService:
                 return OrderRead.model_validate(order)
 
             if status not in VALID_TRANSITIONS.get(current_status, set()):
-                raise ValueError(
-                    f"Invalid status transition from {current_status.value} "
-                    f"to {status.value}"
+                raise InvalidTransition(
+                    f"Invalid status transition from {current_status.value} to {status.value}"
                 )
 
+            was_reserved = current_status == OrderStatus.RESERVED
             order.status = status.value
 
-            if status == OrderStatus.CANCELLED:
+            if status == OrderStatus.CANCELLED and was_reserved:
                 cancel_event_id = uuid.uuid4()
+                correlation_id = correlation_id_ctx.get() or str(uuid.uuid4())
                 cancel_payload = {
                     "event_id": str(cancel_event_id),
+                    "correlation_id": correlation_id,
                     "event_type": "OrderCancelled",
                     "order_id": str(order.id),
                     "user_id": str(order.user_id),

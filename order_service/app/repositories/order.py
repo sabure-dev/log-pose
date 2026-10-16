@@ -46,6 +46,16 @@ class SqlAlchemyOrderRepository(AbstractOrderRepository):
         result = await self.session.execute(query)
         return result.scalar_one_or_none()
 
+    async def get_for_update(self, order_id: uuid.UUID) -> Order | None:
+        query = (
+            select(Order)
+            .where(Order.id == order_id)
+            .with_for_update()
+            .options(selectinload(Order.items))
+        )
+        result = await self.session.execute(query)
+        return result.scalar_one_or_none()
+
     async def get_by_id_and_user(
         self, order_id: uuid.UUID, user_id: uuid.UUID
     ) -> Order | None:
