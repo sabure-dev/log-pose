@@ -3,9 +3,7 @@ import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, status
-from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.router import router
 from app.database import engine
@@ -49,9 +47,6 @@ async def correlation_id_middleware(request: Request, call_next):
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    if isinstance(exc, (StarletteHTTPException, RequestValidationError)):
-        raise exc
-
     correlation_id = getattr(request.state, "correlation_id", "unknown")
     logger.error(
         f"Unhandled error processing {request.method} {request.url.path}: {exc}",

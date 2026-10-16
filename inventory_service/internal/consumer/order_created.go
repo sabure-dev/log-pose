@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -14,10 +13,11 @@ import (
 	"inventory_service/internal/repository"
 )
 
+const maxDeliveryAttempts = 3
+
 type OrderConsumer struct {
 	ch       *amqp.Channel
 	reserver repository.Reserver
-	wg       sync.WaitGroup
 }
 
 func NewOrderConsumer(ch *amqp.Channel, reserver repository.Reserver) *OrderConsumer {
@@ -25,7 +25,20 @@ func NewOrderConsumer(ch *amqp.Channel, reserver repository.Reserver) *OrderCons
 }
 
 func (c *OrderConsumer) Run(ctx context.Context) error {
-	err := c.ch.ExchangeDeclare(
+	if err := c.ch.ExchangeDeclare("logpose_dlx", "topic", true, false, false, false, nil); err != nil {
+		return fmt.Errorf("failed to declare dlx exchange: %w", err)
+	}
+
+	dlq, err := c.ch.QueueDeclare("inventory_order_events_dlq", true, false, false, false, nil)
+	if err != nil {
+		return fmt.Errorf("failed to declare dlq: %w", err)
+	}
+
+	if err := c.ch.QueueBind(dlq.Name, "#", "logpose_dlx", false, nil); err != nil {
+		return fmt.Errorf("failed to bind dlq: %w", err)
+	}
+
+	err = c.ch.ExchangeDeclare(
 		"logpose_events",
 		"topic",
 		true,
@@ -44,7 +57,9 @@ func (c *OrderConsumer) Run(ctx context.Context) error {
 		false,
 		false,
 		false,
-		nil,
+		amqp.Table{
+			"x-dead-letter-exchange": "logpose_dlx",
+		},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to declare queue: %w", err)
@@ -86,28 +101,19 @@ func (c *OrderConsumer) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			c.wg.Wait()
-			return ctx.Err()
+			return nil
 		case amqpErr, ok := <-notifyClose:
 			if ok && amqpErr != nil {
-				return fmt.Errorf("amqp channel closed: %w", amqpErr)
+				return fmt.Errorf("consumer amqp channel closed: %w", amqpErr)
 			}
-			return fmt.Errorf("amqp channel closed")
+			return fmt.Errorf("consumer amqp channel closed")
 		case d, ok := <-msgs:
 			if !ok {
-				return fmt.Errorf("amqp delivery channel closed")
+				return fmt.Errorf("consumer delivery channel closed")
 			}
-			c.wg.Add(1)
-			go func(delivery amqp.Delivery) {
-				defer c.wg.Done()
-				c.handleDelivery(ctx, delivery)
-			}(d)
+			c.handleDelivery(ctx, d)
 		}
 	}
-}
-
-func (c *OrderConsumer) Wait() {
-	c.wg.Wait()
 }
 
 func (c *OrderConsumer) handleDelivery(parentCtx context.Context, d amqp.Delivery) {
@@ -121,7 +127,7 @@ func (c *OrderConsumer) handleDelivery(parentCtx context.Context, d amqp.Deliver
 		c.handleOrderCancelled(processCtx, d)
 	default:
 		slog.Warn("Unhandled routing key", "routing_key", d.RoutingKey)
-		_ = d.Ack(false)
+		_ = d.Nack(false, false)
 	}
 }
 
@@ -136,20 +142,22 @@ func (c *OrderConsumer) handleOrderCreated(ctx context.Context, d amqp.Delivery)
 	err := c.reserver.Reserve(ctx, event)
 	if err != nil {
 		if errors.Is(err, repository.ErrAlreadyProcessed) {
-			slog.Warn("Order already processed", "order_id", event.OrderID)
+			slog.Warn("Order already processed", "order_id", event.OrderID, "correlation_id", event.CorrelationID)
 			_ = d.Ack(false)
 			return
 		}
-		if errors.Is(err, repository.ErrOutOfStock) || errors.Is(err, repository.ErrInvalidQuantity) {
-			slog.Warn("Order rejected by inventory rules", "order_id", event.OrderID, "error", err)
+		if errors.Is(err, repository.ErrOutOfStock) ||
+			errors.Is(err, repository.ErrInvalidQuantity) ||
+			errors.Is(err, repository.ErrPriceMismatch) {
+			slog.Warn("Order rejected by inventory rules", "order_id", event.OrderID, "correlation_id", event.CorrelationID, "error", err)
 			_ = d.Ack(false)
 			return
 		}
-		slog.Error("Transient error during reservation", "order_id", event.OrderID, "error", err)
-		_ = d.Nack(false, true)
+		c.retryOrDeadLetter(ctx, d, event.OrderID.String(), event.CorrelationID, err)
 		return
 	}
 
+	slog.Info("Order items reserved", "order_id", event.OrderID, "correlation_id", event.CorrelationID)
 	_ = d.Ack(false)
 }
 
@@ -164,14 +172,76 @@ func (c *OrderConsumer) handleOrderCancelled(ctx context.Context, d amqp.Deliver
 	err := c.reserver.Release(ctx, event)
 	if err != nil {
 		if errors.Is(err, repository.ErrAlreadyProcessed) {
-			slog.Warn("Order cancellation already processed", "order_id", event.OrderID)
+			slog.Warn("Order cancellation already processed", "order_id", event.OrderID, "correlation_id", event.CorrelationID)
 			_ = d.Ack(false)
 			return
 		}
-		slog.Error("Transient error during release", "order_id", event.OrderID, "error", err)
+		if errors.Is(err, repository.ErrCorruptedReservation) {
+			slog.Error("Permanent reservation corruption detected, sending to DLQ", "order_id", event.OrderID, "correlation_id", event.CorrelationID, "error", err)
+			_ = d.Nack(false, false)
+			return
+		}
+		c.retryOrDeadLetter(ctx, d, event.OrderID.String(), event.CorrelationID, err)
+		return
+	}
+
+	slog.Info("Order reservation released", "order_id", event.OrderID, "correlation_id", event.CorrelationID)
+	_ = d.Ack(false)
+}
+
+func (c *OrderConsumer) retryOrDeadLetter(ctx context.Context, d amqp.Delivery, orderID, correlationID string, err error) {
+	attempts := getRetryCount(d.Headers) + 1
+	if attempts >= maxDeliveryAttempts {
+		slog.Error("Max delivery attempts reached, sending to DLQ", "order_id", orderID, "correlation_id", correlationID, "attempts", attempts, "error", err)
+		_ = d.Nack(false, false)
+		return
+	}
+
+	slog.Warn("Transient error, scheduling retry", "order_id", orderID, "correlation_id", correlationID, "attempt", attempts, "error", err)
+	if c.ch == nil {
 		_ = d.Nack(false, true)
 		return
 	}
 
+	headers := amqp.Table{}
+	for k, v := range d.Headers {
+		headers[k] = v
+	}
+	headers["x-retry-count"] = int32(attempts)
+
+	pubErr := c.ch.PublishWithContext(
+		ctx,
+		d.Exchange,
+		d.RoutingKey,
+		false,
+		false,
+		amqp.Publishing{
+			Headers:      headers,
+			ContentType:  d.ContentType,
+			DeliveryMode: amqp.Persistent,
+			MessageId:    d.MessageId,
+			Body:         d.Body,
+		},
+	)
+	if pubErr != nil {
+		_ = d.Nack(false, true)
+		return
+	}
 	_ = d.Ack(false)
+}
+
+func getRetryCount(headers amqp.Table) int {
+	if headers == nil {
+		return 0
+	}
+	switch v := headers["x-retry-count"].(type) {
+	case int:
+		return v
+	case int32:
+		return int(v)
+	case int64:
+		return int(v)
+	default:
+		return 0
+	}
 }

@@ -4,6 +4,7 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query, status
 
 from app.api.deps import OrderServiceDep, UserIdDep
+from app.domain import NewOrderItem
 from app.exceptions import InvalidTransition, OrderNotFound
 from app.schemas import OrderCreate, OrderRead
 
@@ -21,7 +22,18 @@ async def create_order(
     service: OrderServiceDep,
     current_user_id: UserIdDep,
 ) -> OrderRead:
-    return await service.create_new_order(current_user_id, order_in)
+    domain_items = [
+        NewOrderItem(
+            product_id=item.product_id,
+            quantity=item.quantity,
+            price=item.price,
+        )
+        for item in order_in.items
+    ]
+    order = await service.create_new_order(
+        current_user_id, domain_items, order_in.shipping_address
+    )
+    return OrderRead.model_validate(order)
 
 
 @router.get("/", response_model=list[OrderRead], status_code=status.HTTP_200_OK)
@@ -31,7 +43,8 @@ async def list_orders(
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 100,
 ):
-    return await service.get_orders(current_user_id, skip, limit)
+    orders = await service.get_orders(current_user_id, skip, limit)
+    return [OrderRead.model_validate(o) for o in orders]
 
 
 @router.get("/{order_id}", response_model=OrderRead, status_code=status.HTTP_200_OK)
@@ -45,7 +58,7 @@ async def get_order(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Order not found"
         )
-    return order
+    return OrderRead.model_validate(order)
 
 
 @router.post(
@@ -57,7 +70,8 @@ async def cancel_order(
     current_user_id: UserIdDep,
 ):
     try:
-        return await service.cancel_order(order_id, current_user_id)
+        order = await service.cancel_order(order_id, current_user_id)
+        return OrderRead.model_validate(order)
     except OrderNotFound:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Order not found"

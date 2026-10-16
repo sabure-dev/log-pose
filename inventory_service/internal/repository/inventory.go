@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -15,9 +16,11 @@ import (
 )
 
 var (
-	ErrAlreadyProcessed = errors.New("event already processed")
-	ErrOutOfStock       = errors.New("insufficient stock")
-	ErrInvalidQuantity  = errors.New("quantity must be greater than zero")
+	ErrAlreadyProcessed     = errors.New("event already processed")
+	ErrOutOfStock           = errors.New("insufficient stock")
+	ErrInvalidQuantity      = errors.New("quantity must be greater than zero")
+	ErrPriceMismatch        = errors.New("item price does not match catalog")
+	ErrCorruptedReservation = errors.New("corrupted reservation state")
 )
 
 type Reserver interface {
@@ -34,12 +37,6 @@ func NewInventoryRepository(pool *pgxpool.Pool) *InventoryRepository {
 }
 
 func (r *InventoryRepository) Reserve(ctx context.Context, event domain.OrderCreatedEvent) error {
-	for _, item := range event.Items {
-		if item.Quantity <= 0 {
-			return ErrInvalidQuantity
-		}
-	}
-
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin tx: %w", err)
@@ -63,17 +60,36 @@ func (r *InventoryRepository) Reserve(ctx context.Context, event domain.OrderCre
 		return ErrAlreadyProcessed
 	}
 
+	if len(event.Items) == 0 {
+		return r.failReservation(ctx, tx, event, "empty items list", ErrInvalidQuantity)
+	}
+
 	for _, item := range event.Items {
-		var matches bool
-		err := tx.QueryRow(ctx, "SELECT price = $2::numeric FROM products WHERE id = $1", item.ProductID, item.Price).Scan(&matches)
+		if item.Quantity <= 0 {
+			return r.failReservation(ctx, tx, event, "quantity must be greater than zero", ErrInvalidQuantity)
+		}
+		if item.Price == "" {
+			return r.failReservation(ctx, tx, event, "missing item price", ErrPriceMismatch)
+		}
+		if _, err := strconv.ParseFloat(item.Price, 64); err != nil {
+			return r.failReservation(ctx, tx, event, "invalid item price format", ErrPriceMismatch)
+		}
+
+		var priceMatches bool
+		err := tx.QueryRow(
+			ctx,
+			"SELECT price = $1::numeric FROM products WHERE id = $2",
+			item.Price,
+			item.ProductID,
+		).Scan(&priceMatches)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				return r.failReservation(ctx, tx, event, "product not found in catalog")
+				return r.failReservation(ctx, tx, event, "product not found in catalog", ErrOutOfStock)
 			}
 			return fmt.Errorf("failed to check price for %s: %w", item.ProductID, err)
 		}
-		if !matches {
-			return r.failReservation(ctx, tx, event, fmt.Sprintf("price mismatch for %s", item.ProductID))
+		if !priceMatches {
+			return r.failReservation(ctx, tx, event, fmt.Sprintf("price mismatch for %s", item.ProductID), ErrPriceMismatch)
 		}
 	}
 
@@ -95,7 +111,7 @@ func (r *InventoryRepository) Reserve(ctx context.Context, event domain.OrderCre
 			return fmt.Errorf("stock update error for %s: %w", item.ProductID, err)
 		}
 		if cmdTag.RowsAffected() == 0 {
-			return r.failReservation(ctx, tx, event, "insufficient stock")
+			return r.failReservation(ctx, tx, event, "insufficient stock", ErrOutOfStock)
 		}
 	}
 
@@ -127,6 +143,7 @@ func (r *InventoryRepository) failReservation(
 	tx pgx.Tx,
 	event domain.OrderCreatedEvent,
 	reason string,
+	domainErr error,
 ) error {
 	_, err := tx.Exec(ctx, `
 		UPDATE reservations
@@ -162,7 +179,7 @@ func (r *InventoryRepository) failReservation(
 		return fmt.Errorf("failed to commit failed reservation: %w", commitErr)
 	}
 
-	return ErrOutOfStock
+	return domainErr
 }
 
 func (r *InventoryRepository) Release(ctx context.Context, event domain.OrderCancelledEvent) error {
@@ -174,24 +191,18 @@ func (r *InventoryRepository) Release(ctx context.Context, event domain.OrderCan
 
 	var itemsJSON []byte
 	err = tx.QueryRow(ctx, `
-		UPDATE reservations
-		SET status = 'RELEASED', updated_at = NOW()
-		WHERE order_id = $1 AND status = 'RESERVED'
+		INSERT INTO reservations (order_id, status, items)
+		VALUES ($1, 'RELEASED', '[]'::jsonb)
+		ON CONFLICT (order_id) DO UPDATE
+		    SET status = 'RELEASED', updated_at = NOW()
+		    WHERE reservations.status = 'RESERVED'
 		RETURNING items
 	`, event.OrderID).Scan(&itemsJSON)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			_, err = tx.Exec(ctx, `
-				INSERT INTO reservations (order_id, status, items)
-				VALUES ($1, 'RELEASED', '[]')
-				ON CONFLICT (order_id) DO NOTHING
-			`, event.OrderID)
-			if err != nil {
-				return fmt.Errorf("failed to insert tombstone: %w", err)
-			}
-			return tx.Commit(ctx)
+			return nil
 		}
-		return fmt.Errorf("failed to update reservation status: %w", err)
+		return fmt.Errorf("failed to release reservation: %w", err)
 	}
 
 	var reservedItems []domain.OrderItemPayload
@@ -204,15 +215,18 @@ func (r *InventoryRepository) Release(ctx context.Context, event domain.OrderCan
 	})
 
 	for _, item := range reservedItems {
-		_, err := tx.Exec(ctx, `
+		cmdTag, err := tx.Exec(ctx, `
 			UPDATE inventory_stocks
 			SET available = available + $1,
 			    reserved = reserved - $1,
 			    updated_at = NOW()
-			WHERE product_id = $2
+			WHERE product_id = $2 AND reserved >= $1
 		`, item.Quantity, item.ProductID)
 		if err != nil {
 			return fmt.Errorf("failed to restore stock for %s: %w", item.ProductID, err)
+		}
+		if cmdTag.RowsAffected() == 0 {
+			return fmt.Errorf("%w: product %s reserved count underflow", ErrCorruptedReservation, item.ProductID)
 		}
 	}
 
