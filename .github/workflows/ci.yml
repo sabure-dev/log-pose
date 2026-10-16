@@ -9,16 +9,9 @@ on:
 jobs:
   python-test-and-lint:
     runs-on: ubuntu-latest
-
-    strategy:
-      fail-fast: false
-      matrix:
-        service:
-          - order_service
-
     defaults:
       run:
-        working-directory: ./${{ matrix.service }}
+        working-directory: ./order_service
 
     steps:
       - name: Clone repo
@@ -51,3 +44,25 @@ jobs:
           DB_PORT: 5432
           DB_NAME: dummy_db
         run: uv run pytest
+
+  go-test-and-lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./inventory_service
+
+    steps:
+      - name: Clone repo
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: ./inventory_service/go.sum
+
+      - name: Go Vet
+        run: go vet ./...
+
+      - name: Go Test
+        run: go test -v ./...
