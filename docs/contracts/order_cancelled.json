@@ -1,0 +1,14 @@
+{
+  "event_id": "9b1c3059-85e7-5f6b-9c2c-79047efd0ea6",
+  "correlation_id": "c0a80101-0000-0000-0000-000000000001",
+  "event_type": "OrderCancelled",
+  "order_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "user_id": "123e4567-e89b-12d3-a456-426614174000",
+  "items": [
+    {
+      "product_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "quantity": 2
+    }
+  ],
+  "occurred_at": "2026-10-17T00:00:00.000000+00:00"
+}

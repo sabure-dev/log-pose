@@ -4,23 +4,24 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
-	"github.com/google/uuid"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"inventory_service/internal/domain"
 	"inventory_service/internal/repository"
 )
 
 type OrderConsumer struct {
-	ch   *amqp.Channel
-	repo *repository.InventoryRepository
-	wg   sync.WaitGroup
+	ch       *amqp.Channel
+	reserver repository.Reserver
+	wg       sync.WaitGroup
 }
 
-func NewOrderConsumer(ch *amqp.Channel, repo *repository.InventoryRepository) *OrderConsumer {
-	return &OrderConsumer{ch: ch, repo: repo}
+func NewOrderConsumer(ch *amqp.Channel, reserver repository.Reserver) *OrderConsumer {
+	return &OrderConsumer{ch: ch, reserver: reserver}
 }
 
 func (c *OrderConsumer) Start(ctx context.Context) error {
@@ -34,7 +35,7 @@ func (c *OrderConsumer) Start(ctx context.Context) error {
 		nil,
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to declare exchange: %w", err)
 	}
 
 	q, err := c.ch.QueueDeclare(
@@ -46,29 +47,24 @@ func (c *OrderConsumer) Start(ctx context.Context) error {
 		nil,
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to declare queue: %w", err)
 	}
 
-	err = c.ch.QueueBind(
-		q.Name,
-		"order.created",
-		"logpose_events",
-		false,
-		nil,
-	)
-	if err != nil {
-		return err
+	for _, routingKey := range []string{"order.created", "order.cancelled"} {
+		err = c.ch.QueueBind(
+			q.Name,
+			routingKey,
+			"logpose_events",
+			false,
+			nil,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to bind queue to %s: %w", routingKey, err)
+		}
 	}
 
-	err = c.ch.QueueBind(
-		q.Name,
-		"order.cancelled",
-		"logpose_events",
-		false,
-		nil,
-	)
-	if err != nil {
-		return err
+	if err := c.ch.Qos(20, 0, false); err != nil {
+		return fmt.Errorf("failed to set QoS: %w", err)
 	}
 
 	msgs, err := c.ch.Consume(
@@ -81,8 +77,10 @@ func (c *OrderConsumer) Start(ctx context.Context) error {
 		nil,
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to start consumer: %w", err)
 	}
+
+	notifyClose := c.ch.NotifyClose(make(chan *amqp.Error, 1))
 
 	c.wg.Add(1)
 	go func() {
@@ -91,16 +89,21 @@ func (c *OrderConsumer) Start(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 				return
+			case amqpErr, ok := <-notifyClose:
+				if ok && amqpErr != nil {
+					slog.Error("AMQP channel closed unexpectedly", "error", amqpErr)
+				}
+				return
 			case d, ok := <-msgs:
 				if !ok {
 					return
 				}
-				c.handleMessage(ctx, d)
+				c.handleDelivery(ctx, d)
 			}
 		}
 	}()
 
-	slog.Info("Inventory OrderConsumer started", "queue", q.Name)
+	slog.Info("OrderConsumer started", "queue", q.Name)
 	return nil
 }
 
@@ -108,14 +111,17 @@ func (c *OrderConsumer) Wait() {
 	c.wg.Wait()
 }
 
-func (c *OrderConsumer) handleMessage(ctx context.Context, d amqp.Delivery) {
+func (c *OrderConsumer) handleDelivery(parentCtx context.Context, d amqp.Delivery) {
+	processCtx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), 15*time.Second)
+	defer cancel()
+
 	switch d.RoutingKey {
 	case "order.created":
-		c.handleOrderCreated(ctx, d)
+		c.handleOrderCreated(processCtx, d)
 	case "order.cancelled":
-		c.handleOrderCancelled(ctx, d)
+		c.handleOrderCancelled(processCtx, d)
 	default:
-		slog.Warn("Unhandled routing key received", "routing_key", d.RoutingKey)
+		slog.Warn("Unhandled routing key", "routing_key", d.RoutingKey)
 		_ = d.Ack(false)
 	}
 }
@@ -123,98 +129,50 @@ func (c *OrderConsumer) handleMessage(ctx context.Context, d amqp.Delivery) {
 func (c *OrderConsumer) handleOrderCreated(ctx context.Context, d amqp.Delivery) {
 	var event domain.OrderCreatedEvent
 	if err := json.Unmarshal(d.Body, &event); err != nil {
-		slog.Error("Failed to unmarshal OrderCreated payload", "error", err)
+		slog.Error("Malformed OrderCreated payload", "error", err)
 		_ = d.Nack(false, false)
 		return
 	}
 
-	slog.Info("Processing OrderCreated event", "order_id", event.OrderID, "event_id", event.EventID)
-
-	err := c.repo.ReserveItems(ctx, event.EventID, event.Items)
+	err := c.reserver.Reserve(ctx, event)
 	if err != nil {
 		if errors.Is(err, repository.ErrAlreadyProcessed) {
-			slog.Warn("Event already processed, acknowledging duplicate", "event_id", event.EventID)
+			slog.Warn("Order already processed", "order_id", event.OrderID)
 			_ = d.Ack(false)
 			return
 		}
-
-		if errors.Is(err, repository.ErrOutOfStock) {
-			slog.Warn("Order reservation failed due to insufficient stock", "order_id", event.OrderID)
-			c.publishResult(ctx, event.OrderID, "FAILED", err.Error())
+		if errors.Is(err, repository.ErrOutOfStock) || errors.Is(err, repository.ErrInvalidQuantity) || errors.Is(err, repository.ErrPriceMismatch) {
+			slog.Warn("Order rejected by inventory rules", "order_id", event.OrderID, "error", err)
 			_ = d.Ack(false)
 			return
 		}
-
-		slog.Error("Transient error reserving items", "order_id", event.OrderID, "error", err)
+		slog.Error("Transient error during reservation", "order_id", event.OrderID, "error", err)
 		_ = d.Nack(false, true)
 		return
 	}
 
-	slog.Info("Items reserved successfully", "order_id", event.OrderID)
-	c.publishResult(ctx, event.OrderID, "RESERVED", "")
 	_ = d.Ack(false)
 }
 
 func (c *OrderConsumer) handleOrderCancelled(ctx context.Context, d amqp.Delivery) {
 	var event domain.OrderCancelledEvent
 	if err := json.Unmarshal(d.Body, &event); err != nil {
-		slog.Error("Failed to unmarshal OrderCancelled payload", "error", err)
+		slog.Error("Malformed OrderCancelled payload", "error", err)
 		_ = d.Nack(false, false)
 		return
 	}
 
-	slog.Info("Processing OrderCancelled event, releasing stock", "order_id", event.OrderID, "event_id", event.EventID)
-
-	err := c.repo.ReleaseItems(ctx, event.EventID, event.Items)
+	err := c.reserver.Release(ctx, event)
 	if err != nil {
 		if errors.Is(err, repository.ErrAlreadyProcessed) {
-			slog.Warn("Event already processed, acknowledging duplicate", "event_id", event.EventID)
+			slog.Warn("Order cancellation already processed", "order_id", event.OrderID)
 			_ = d.Ack(false)
 			return
 		}
-
-		slog.Error("Transient error releasing items", "order_id", event.OrderID, "error", err)
+		slog.Error("Transient error during release", "order_id", event.OrderID, "error", err)
 		_ = d.Nack(false, true)
 		return
 	}
 
-	slog.Info("Items released successfully", "order_id", event.OrderID)
 	_ = d.Ack(false)
-}
-
-func (c *OrderConsumer) publishResult(ctx context.Context, orderID uuid.UUID, status, reason string) {
-	res := domain.InventoryReservedEvent{
-		EventID:   uuid.New(),
-		EventType: "InventoryReservationResult",
-		OrderID:   orderID,
-		Status:    status,
-		Reason:    reason,
-	}
-
-	body, err := json.Marshal(res)
-	if err != nil {
-		slog.Error("Failed to marshal reservation result", "error", err)
-		return
-	}
-
-	routingKey := "inventory.reserved"
-	if status == "FAILED" {
-		routingKey = "inventory.failed"
-	}
-
-	err = c.ch.PublishWithContext(
-		ctx,
-		"logpose_events",
-		routingKey,
-		false,
-		false,
-		amqp.Publishing{
-			ContentType:  "application/json",
-			DeliveryMode: amqp.Persistent,
-			Body:         body,
-		},
-	)
-	if err != nil {
-		slog.Error("Failed to publish inventory reservation result", "routing_key", routingKey, "error", err)
-	}
 }

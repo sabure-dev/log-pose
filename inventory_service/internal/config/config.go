@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 )
 
@@ -9,19 +10,19 @@ type Config struct {
 	RabbitMQURL string
 }
 
-func Load() *Config {
+func Load() (*Config, error) {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		dbURL = "postgres://inventory_user:inventory_password@localhost:5433/inventory_db?sslmode=disable"
+		return nil, fmt.Errorf("DATABASE_URL environment variable is required")
 	}
 
 	rmqURL := os.Getenv("RABBITMQ_URL")
 	if rmqURL == "" {
-		rmqURL = "amqp://guest:guest@localhost:5672/"
+		return nil, fmt.Errorf("RABBITMQ_URL environment variable is required")
 	}
 
 	return &Config{
 		DatabaseURL: dbURL,
 		RabbitMQURL: rmqURL,
-	}
+	}, nil
 }
