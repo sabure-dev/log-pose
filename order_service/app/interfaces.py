@@ -3,8 +3,8 @@ from abc import ABC, abstractmethod
 from decimal import Decimal
 from typing import Any, Sequence
 
-from app.api.schemas import OrderItemCreate
 from app.models import Order
+from app.schemas import OrderItemCreate
 
 
 class AbstractOrderRepository(ABC):
@@ -14,6 +14,7 @@ class AbstractOrderRepository(ABC):
         user_id: uuid.UUID,
         total_amount: Decimal,
         items_data: list[OrderItemCreate],
+        shipping_address: str | None = None,
     ) -> Order:
         raise NotImplementedError
 
@@ -22,7 +23,19 @@ class AbstractOrderRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def get_by_id_and_user(
+        self, order_id: uuid.UUID, user_id: uuid.UUID
+    ) -> Order | None:
+        raise NotImplementedError
+
+    @abstractmethod
     async def get_all(self, skip: int = 0, limit: int = 100) -> Sequence[Order]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_all_by_user(
+        self, user_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> Sequence[Order]:
         raise NotImplementedError
 
 
