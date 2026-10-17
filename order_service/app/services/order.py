@@ -72,7 +72,8 @@ class OrderService:
                         existing, items, shipping_address
                     ):
                         raise IdempotencyConflict(
-                            "Idempotency-Key already used with different order parameters"
+                            "Idempotency-Key already used with "
+                            "different order parameters"
                         )
                     return existing
 
@@ -95,7 +96,8 @@ class OrderService:
                             existing, items, shipping_address
                         ):
                             raise IdempotencyConflict(
-                                "Idempotency-Key already used with different order parameters"
+                                "Idempotency-Key already used with "
+                                "different order parameters"
                             )
                         return existing
                 raise

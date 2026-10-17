@@ -112,7 +112,8 @@ async def test_create_order_idempotency_key_and_conflict(
     )
     assert resp_conflict.status_code == 409
 
-    # Two requests with empty Idempotency-Key: "" must be normalized to None and create 2 distinct orders without 500
+    # Two requests with empty Idempotency-Key:
+    # "" must be normalized to None and create 2 distinct orders without 500
     empty_key_headers = {"X-User-Id": user_id, "Idempotency-Key": "   "}
     resp_empty1 = await async_client.post(
         "/orders/", json=payload, headers=empty_key_headers
@@ -264,9 +265,7 @@ async def test_ship_and_complete_order_endpoints_require_operator_auth(
     }
 
     # Cannot ship while still PENDING
-    ship_early = await async_client.post(
-        f"/orders/{order_id}/ship", headers=op_headers
-    )
+    ship_early = await async_client.post(f"/orders/{order_id}/ship", headers=op_headers)
     assert ship_early.status_code == 409
 
     # Transition to RESERVED (simulating inventory.reserved consumer)
@@ -274,9 +273,7 @@ async def test_ship_and_complete_order_endpoints_require_operator_auth(
     service = OrderService(uow=uow)
     await service.update_order_status(order_id, OrderStatus.RESERVED)
 
-    ship_resp = await async_client.post(
-        f"/orders/{order_id}/ship", headers=op_headers
-    )
+    ship_resp = await async_client.post(f"/orders/{order_id}/ship", headers=op_headers)
     assert ship_resp.status_code == 200
     assert ship_resp.json()["status"] == OrderStatus.READY_FOR_SHIPPING.value
 
