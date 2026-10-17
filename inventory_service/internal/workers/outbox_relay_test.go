@@ -13,6 +13,8 @@ import (
 	"inventory_service/migrations"
 )
 
+const testDBAdvisoryLockID = 74920183
+
 type stubConfirm struct {
 	ok  bool
 	err error
@@ -35,15 +37,36 @@ func setupRelayTestDB(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("failed to connect to db: %v", err)
 	}
 
+	// Acquire a session-level advisory lock on a dedicated connection so parallel package runs don't conflict or deadlock.
+	lockConn, err := pool.Acquire(ctx)
+	if err != nil {
+		pool.Close()
+		t.Fatalf("failed to acquire lock connection: %v", err)
+	}
+	if _, err := lockConn.Exec(ctx, "SELECT pg_advisory_lock($1)", testDBAdvisoryLockID); err != nil {
+		lockConn.Release()
+		pool.Close()
+		t.Fatalf("failed to acquire db advisory lock: %v", err)
+	}
+
 	if err := migrations.Apply(ctx, pool, false); err != nil {
+		_, _ = lockConn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", testDBAdvisoryLockID)
+		lockConn.Release()
+		pool.Close()
 		t.Fatalf("failed to apply migrations: %v", err)
 	}
 
-	if _, err := pool.Exec(ctx, "TRUNCATE TABLE outbox_events, reservations, inventory_stocks, products CASCADE"); err != nil {
-		t.Fatalf("failed to truncate tables: %v", err)
+	// Relay tests only mutate outbox_events; clean up without locking unrelated tables.
+	if _, err := pool.Exec(ctx, "DELETE FROM outbox_events;"); err != nil {
+		_, _ = lockConn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", testDBAdvisoryLockID)
+		lockConn.Release()
+		pool.Close()
+		t.Fatalf("failed to clean outbox_events: %v", err)
 	}
 
 	t.Cleanup(func() {
+		_, _ = lockConn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", testDBAdvisoryLockID)
+		lockConn.Release()
 		pool.Close()
 	})
 	return pool

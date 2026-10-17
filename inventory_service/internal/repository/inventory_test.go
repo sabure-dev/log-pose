@@ -15,6 +15,8 @@ import (
 	"inventory_service/migrations"
 )
 
+const testDBAdvisoryLockID = 74920183
+
 func setupTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	dbURL := os.Getenv("TEST_DATABASE_URL")
@@ -28,16 +30,36 @@ func setupTestDB(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("failed to connect to db: %v", err)
 	}
 
+	// Acquire a session-level advisory lock on a dedicated connection so parallel package runs don't conflict or deadlock.
+	lockConn, err := pool.Acquire(ctx)
+	if err != nil {
+		pool.Close()
+		t.Fatalf("failed to acquire lock connection: %v", err)
+	}
+	if _, err := lockConn.Exec(ctx, "SELECT pg_advisory_lock($1)", testDBAdvisoryLockID); err != nil {
+		lockConn.Release()
+		pool.Close()
+		t.Fatalf("failed to acquire db advisory lock: %v", err)
+	}
+
 	if err := migrations.Apply(ctx, pool, false); err != nil {
+		_, _ = lockConn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", testDBAdvisoryLockID)
+		lockConn.Release()
+		pool.Close()
 		t.Fatalf("failed to apply migrations: %v", err)
 	}
 
-	_, err = pool.Exec(ctx, "TRUNCATE TABLE outbox_events, reservations, inventory_stocks, products CASCADE")
+	_, err = pool.Exec(ctx, "DELETE FROM outbox_events; DELETE FROM reservations; DELETE FROM inventory_stocks; DELETE FROM products;")
 	if err != nil {
-		t.Fatalf("failed to truncate tables: %v", err)
+		_, _ = lockConn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", testDBAdvisoryLockID)
+		lockConn.Release()
+		pool.Close()
+		t.Fatalf("failed to clean tables: %v", err)
 	}
 
 	t.Cleanup(func() {
+		_, _ = lockConn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", testDBAdvisoryLockID)
+		lockConn.Release()
 		pool.Close()
 	})
 	return pool
@@ -162,9 +184,9 @@ func TestReserveFailed_ThenCancel_DoesNotInflateOrLeakStock(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := pool.Exec(ctx, "TRUNCATE TABLE outbox_events, reservations, inventory_stocks, products CASCADE")
+			_, err := pool.Exec(ctx, "DELETE FROM outbox_events; DELETE FROM reservations; DELETE FROM inventory_stocks; DELETE FROM products;")
 			if err != nil {
-				t.Fatalf("failed to truncate tables: %v", err)
+				t.Fatalf("failed to clean tables: %v", err)
 			}
 
 			seedProduct(t, pool, tc.keyboardID, "1500.50", 100)

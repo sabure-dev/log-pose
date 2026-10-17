@@ -131,9 +131,7 @@ class OrderService:
             await self.uow.commit()
             return updated_order or order
 
-    async def ship_order(
-        self, order_id: uuid.UUID, user_id: uuid.UUID
-    ) -> OrderEntity:
+    async def ship_order(self, order_id: uuid.UUID, user_id: uuid.UUID) -> OrderEntity:
         async with self.uow:
             order = await self.uow.orders.get_for_update(order_id)
             if not order or order.user_id != user_id:
