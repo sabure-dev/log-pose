@@ -7,7 +7,7 @@ import pytest
 
 from app.domain import NewOrderItem, OrderEntity, OrderItemEntity
 from app.enums import OrderStatus
-from app.exceptions import InvalidTransition
+from app.exceptions import IdempotencyConflict, InvalidTransition
 from app.interfaces import (
     AbstractOrderRepository,
     AbstractOutboxRepository,
@@ -83,7 +83,7 @@ class FakeOrderRepository(AbstractOrderRepository):
             total_amount=existing.total_amount,
             shipping_address=existing.shipping_address,
             cancellation_reason=(
-                cancellation_reason
+                cancellation_reason[:500]
                 if cancellation_reason is not None
                 else existing.cancellation_reason
             ),
@@ -171,11 +171,12 @@ async def test_create_order_calculates_total_and_commits():
     assert event["payload"]["total_amount"] == "400.00"
 
 
-async def test_create_order_with_idempotency_key_deduplicates():
+async def test_create_order_with_idempotency_key_deduplicates_and_detects_conflict():
     uow = FakeUnitOfWork()
     service = OrderService(uow=uow)
     user_id = uuid.uuid4()
-    items = [NewOrderItem(product_id=uuid.uuid4(), quantity=1, price=Decimal("99.50"))]
+    product_id = uuid.uuid4()
+    items = [NewOrderItem(product_id=product_id, quantity=1, price=Decimal("99.50"))]
 
     first = await service.create_new_order(
         user_id=user_id, items=items, idempotency_key="idem-key-1"
@@ -186,6 +187,21 @@ async def test_create_order_with_idempotency_key_deduplicates():
 
     assert first.id == second.id
     assert len(uow.outbox.events) == 1
+
+    # Different quantity with same Idempotency-Key must raise IdempotencyConflict
+    different_items = [
+        NewOrderItem(product_id=product_id, quantity=2, price=Decimal("99.50"))
+    ]
+    with pytest.raises(IdempotencyConflict):
+        await service.create_new_order(
+            user_id=user_id, items=different_items, idempotency_key="idem-key-1"
+        )
+
+    # Blank/whitespace idempotency_key is normalized to None
+    blank_order = await service.create_new_order(
+        user_id=user_id, items=items, idempotency_key="   "
+    )
+    assert blank_order.idempotency_key is None
 
 
 async def test_cancel_pending_order_emits_cancelled_event_and_sets_reason():
@@ -212,19 +228,20 @@ async def test_cancel_pending_order_emits_cancelled_event_and_sets_reason():
     ]
 
 
-async def test_system_cancel_from_pending_records_reason_and_skips_event():
+async def test_system_cancel_from_pending_records_truncated_reason_and_skips_event():
     uow = FakeUnitOfWork()
     service = OrderService(uow=uow)
     user_id = uuid.uuid4()
 
     draft_order = await uow.orders.add(user_id, Decimal("100.00"), [])
+    long_reason = "x" * 700
     updated = await service.update_order_status(
-        draft_order.id, OrderStatus.CANCELLED, reason="insufficient stock"
+        draft_order.id, OrderStatus.CANCELLED, reason=long_reason
     )
 
     assert updated is not None
     assert updated.status == OrderStatus.CANCELLED
-    assert updated.cancellation_reason == "insufficient stock"
+    assert len(updated.cancellation_reason or "") == 500
     cancelled_events = [e for e in uow.outbox.events if e["topic"] == "order.cancelled"]
     assert len(cancelled_events) == 0
 

@@ -17,6 +17,7 @@ class Settings(BaseSettings):
 
     rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
     pending_order_timeout_seconds: int = 900
+    internal_api_token: str = "logpose-internal-secret"
 
     @computed_field
     @property

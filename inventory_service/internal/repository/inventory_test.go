@@ -3,10 +3,13 @@ package repository_test
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,12 +20,25 @@ import (
 
 const testDBAdvisoryLockID = 74920183
 
+func assertTestDatabaseName(t *testing.T, rawURL string) {
+	t.Helper()
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("invalid TEST_DATABASE_URL: %v", err)
+	}
+	dbName := strings.TrimPrefix(parsed.Path, "/")
+	if !strings.HasSuffix(dbName, "_test") {
+		t.Fatalf("refusing to run destructive integration tests on non-test database %q (database name must end with _test)", dbName)
+	}
+}
+
 func setupTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
 		t.Skip("TEST_DATABASE_URL not set, skipping postgres integration test")
 	}
+	assertTestDatabaseName(t, dbURL)
 
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dbURL)
@@ -30,7 +46,6 @@ func setupTestDB(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("failed to connect to db: %v", err)
 	}
 
-	// Acquire a session-level advisory lock on a dedicated connection so parallel package runs don't conflict or deadlock.
 	lockConn, err := pool.Acquire(ctx)
 	if err != nil {
 		pool.Close()
@@ -42,7 +57,7 @@ func setupTestDB(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("failed to acquire db advisory lock: %v", err)
 	}
 
-	if err := migrations.Apply(ctx, pool, false); err != nil {
+	if err := migrations.Apply(ctx, pool); err != nil {
 		_, _ = lockConn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", testDBAdvisoryLockID)
 		lockConn.Release()
 		pool.Close()
@@ -67,19 +82,9 @@ func setupTestDB(t *testing.T) *pgxpool.Pool {
 
 func seedProduct(t *testing.T, pool *pgxpool.Pool, productID uuid.UUID, price string, available int) {
 	t.Helper()
-	ctx := context.Background()
-	_, err := pool.Exec(ctx, `
-		INSERT INTO products (id, name, price) VALUES ($1, 'Test Item', $2::numeric)
-	`, productID, price)
-	if err != nil {
-		t.Fatalf("failed to seed product: %v", err)
-	}
-
-	_, err = pool.Exec(ctx, `
-		INSERT INTO inventory_stocks (product_id, available, reserved) VALUES ($1, $2, 0)
-	`, productID, available)
-	if err != nil {
-		t.Fatalf("failed to seed stock: %v", err)
+	repo := repository.NewInventoryRepository(pool)
+	if err := repo.UpsertProduct(context.Background(), productID, "Test Item", price, available); err != nil {
+		t.Fatalf("failed to seed product via UpsertProduct: %v", err)
 	}
 }
 
@@ -161,10 +166,6 @@ func TestReserveFailed_ThenCancel_DoesNotInflateOrLeakStock(t *testing.T) {
 	idLow := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 	idHigh := uuid.MustParse("00000000-0000-0000-0000-000000000002")
 
-	// Test both deterministic sort orders:
-	// Case 1: Sufficient item sorts FIRST (idLow), insufficient item sorts SECOND (idHigh).
-	// This specifically verifies that the SAVEPOINT rolls back the first item's stock deduction when the second item fails.
-	// Case 2: Insufficient item sorts FIRST (idLow), sufficient item sorts SECOND (idHigh).
 	cases := []struct {
 		name       string
 		keyboardID uuid.UUID
@@ -303,7 +304,6 @@ func TestReserve_ThenRelease_RestoresStockAndIsIdempotent(t *testing.T) {
 		t.Fatalf("expected Reserve to succeed, got %v", err)
 	}
 
-	// Duplicate Reserve should return ErrAlreadyProcessed
 	if err := repo.Reserve(ctx, createEv); !errors.Is(err, repository.ErrAlreadyProcessed) {
 		t.Fatalf("expected ErrAlreadyProcessed on duplicate Reserve, got %v", err)
 	}
@@ -325,7 +325,6 @@ func TestReserve_ThenRelease_RestoresStockAndIsIdempotent(t *testing.T) {
 		t.Fatalf("expected Release to succeed, got %v", err)
 	}
 
-	// Duplicate Release should be a no-op
 	if err := repo.Release(ctx, cancelEv); err != nil {
 		t.Fatalf("expected duplicate Release to return nil, got %v", err)
 	}
@@ -372,7 +371,6 @@ func TestReserve_ThenConfirm_DeductsReservedStock(t *testing.T) {
 		t.Fatalf("expected Confirm to succeed, got %v", err)
 	}
 
-	// Duplicate Confirm should be idempotent
 	if err := repo.Confirm(ctx, completeEv); err != nil {
 		t.Fatalf("expected duplicate Confirm to return nil, got %v", err)
 	}
@@ -410,7 +408,6 @@ func TestReserve_PriceMismatchAndInvalidPrices(t *testing.T) {
 		}
 	}
 
-	// Product not in catalog should return ErrProductNotFound
 	unknownEv := domain.OrderCreatedEvent{
 		EventID:     uuid.New(),
 		EventType:   "OrderCreated",
@@ -423,5 +420,12 @@ func TestReserve_PriceMismatchAndInvalidPrices(t *testing.T) {
 	}
 	if err := repo.Reserve(ctx, unknownEv); !errors.Is(err, repository.ErrProductNotFound) {
 		t.Fatalf("expected ErrProductNotFound, got %v", err)
+	}
+
+	// Verify CleanupProcessedOutboxEvents with batch limit
+	_, _ = pool.Exec(ctx, "UPDATE outbox_events SET processed = TRUE, created_at = NOW() - INTERVAL '10 days'")
+	deleted, err := repo.CleanupProcessedOutboxEvents(ctx, 7*24*time.Hour, 100)
+	if err != nil || deleted == 0 {
+		t.Fatalf("expected CleanupProcessedOutboxEvents to delete old processed rows, got deleted=%d, err=%v", deleted, err)
 	}
 }

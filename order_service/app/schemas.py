@@ -3,7 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from app.enums import OrderStatus
 
@@ -11,7 +11,15 @@ from app.enums import OrderStatus
 class OrderItemCreate(BaseModel):
     product_id: uuid.UUID
     quantity: Annotated[int, Field(ge=1, le=10000)] = 1
-    price: Annotated[Decimal, Field(gt=0, max_digits=10, decimal_places=2)]
+    price: Annotated[
+        Decimal,
+        Field(
+            gt=0,
+            max_digits=10,
+            decimal_places=2,
+            validation_alias=AliasChoices("price", "expected_price"),
+        ),
+    ]
 
 
 class OrderCreate(BaseModel):

@@ -23,4 +23,7 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
 
     SELECT 'CREATE DATABASE inventory_db OWNER inventory_user'
     WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'inventory_db')\gexec
+
+    SELECT 'CREATE DATABASE inventory_test OWNER inventory_user'
+    WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'inventory_test')\gexec
 EOSQL

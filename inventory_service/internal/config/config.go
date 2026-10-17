@@ -3,11 +3,13 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 type Config struct {
 	DatabaseURL string
 	RabbitMQURL string
+	SeedCatalog bool
 }
 
 func Load() (*Config, error) {
@@ -21,8 +23,12 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("RABBITMQ_URL environment variable is required")
 	}
 
+	seedRaw := strings.ToLower(strings.TrimSpace(os.Getenv("SEED_CATALOG")))
+	seedCatalog := seedRaw == "true" || seedRaw == "1" || seedRaw == "yes"
+
 	return &Config{
 		DatabaseURL: dbURL,
 		RabbitMQURL: rmqURL,
+		SeedCatalog: seedCatalog,
 	}, nil
 }

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
 import aio_pika
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -18,8 +18,11 @@ from app.services.order import OrderService
 
 logger = logging.getLogger(__name__)
 
-MAX_OUTBOX_ATTEMPTS = 5
+MAX_OUTBOX_ATTEMPTS = 20
+MAX_BACKOFF_SECONDS = 300
+CLAIM_LEASE_SECONDS = 30
 PUBLISH_TIMEOUT_SECONDS = 5.0
+CLEANUP_BATCH_LIMIT = 1000
 
 
 async def fetch_unprocessed_events(
@@ -44,12 +47,28 @@ async def fetch_unprocessed_events(
     return result.scalars().all()
 
 
+async def claim_unprocessed_events(
+    session: AsyncSession, batch_size: int = 50
+) -> Sequence[OutboxEvent]:
+    events = await fetch_unprocessed_events(session, batch_size=batch_size)
+    if not events:
+        return []
+
+    lease_until = datetime.now(timezone.utc) + timedelta(seconds=CLAIM_LEASE_SECONDS)
+    for event in events:
+        event.next_retry_at = lease_until
+
+    # Commit the short lease immediately so row locks are NOT held during network I/O.
+    await session.commit()
+    return events
+
+
 async def process_outbox_batch(
     session: AsyncSession,
     exchange: aio_pika.abc.AbstractExchange,
     batch_size: int = 50,
 ) -> int:
-    events = await fetch_unprocessed_events(session, batch_size=batch_size)
+    events = await claim_unprocessed_events(session, batch_size=batch_size)
     if not events:
         return 0
 
@@ -78,11 +97,12 @@ async def process_outbox_batch(
             )
             event.processed = True
             event.last_error = None
+            event.next_retry_at = None
             published_count += 1
             logger.info(f"Event sent: {event.topic} (ID: {event.id})")
         except Exception as exc:
             next_attempt = (event.attempts or 0) + 1
-            backoff_seconds = 1 << min(next_attempt, 6)
+            backoff_seconds = min(1 << min(next_attempt, 9), MAX_BACKOFF_SECONDS)
             event.attempts = next_attempt
             event.last_error = str(exc)
             event.next_retry_at = datetime.now(timezone.utc) + timedelta(
@@ -105,14 +125,37 @@ async def process_outbox_batch(
     return published_count
 
 
+async def requeue_parked_outbox_events(session: AsyncSession) -> int:
+    stmt = (
+        update(OutboxEvent)
+        .where(
+            OutboxEvent.processed.is_(False),
+            OutboxEvent.attempts >= MAX_OUTBOX_ATTEMPTS,
+        )
+        .values(attempts=0, last_error=None, next_retry_at=None)
+    )
+    result = await session.execute(stmt)
+    await session.commit()
+    return result.rowcount or 0
+
+
 async def cleanup_processed_outbox_events(
-    session: AsyncSession, retention_days: int = 7
+    session: AsyncSession,
+    retention_days: int = 7,
+    batch_limit: int = CLEANUP_BATCH_LIMIT,
 ) -> int:
     cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
-    stmt = delete(OutboxEvent).where(
-        OutboxEvent.processed.is_(True),
-        OutboxEvent.created_at < cutoff,
+    subq = (
+        select(OutboxEvent.id)
+        .where(
+            OutboxEvent.processed.is_(True),
+            OutboxEvent.created_at < cutoff,
+        )
+        .order_by(OutboxEvent.created_at.asc())
+        .limit(batch_limit)
+        .scalar_subquery()
     )
+    stmt = delete(OutboxEvent).where(OutboxEvent.id.in_(subq))
     result = await session.execute(stmt)
     await session.commit()
     return result.rowcount or 0

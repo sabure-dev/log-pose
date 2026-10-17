@@ -51,10 +51,17 @@ func run() error {
 	}
 	slog.Info("Connected to PostgreSQL")
 
-	if err := migrations.Apply(ctx, pool, true); err != nil {
+	if err := migrations.Apply(ctx, pool); err != nil {
 		return fmt.Errorf("failed to apply migrations: %w", err)
 	}
 	slog.Info("Database migrations applied successfully")
+
+	if cfg.SeedCatalog {
+		if err := migrations.SeedCatalog(ctx, pool); err != nil {
+			return fmt.Errorf("failed to seed catalog: %w", err)
+		}
+		slog.Info("Demo catalog seeded successfully")
+	}
 
 	conn, err := amqp.Dial(cfg.RabbitMQURL)
 	if err != nil {

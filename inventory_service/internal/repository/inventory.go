@@ -376,12 +376,24 @@ func (r *InventoryRepository) Confirm(ctx context.Context, event domain.OrderCom
 	return tx.Commit(ctx)
 }
 
-func (r *InventoryRepository) CleanupProcessedOutboxEvents(ctx context.Context, olderThan time.Duration) (int64, error) {
+func (r *InventoryRepository) CleanupProcessedOutboxEvents(
+	ctx context.Context,
+	olderThan time.Duration,
+	batchLimit int,
+) (int64, error) {
+	if batchLimit <= 0 {
+		batchLimit = 1000
+	}
 	cutoff := time.Now().UTC().Add(-olderThan)
 	cmdTag, err := r.pool.Exec(ctx, `
 		DELETE FROM outbox_events
-		WHERE processed = TRUE AND created_at < $1
-	`, cutoff)
+		WHERE id IN (
+			SELECT id FROM outbox_events
+			WHERE processed = TRUE AND created_at < $1
+			ORDER BY created_at ASC
+			LIMIT $2
+		)
+	`, cutoff, batchLimit)
 	if err != nil {
 		return 0, fmt.Errorf("failed to cleanup processed outbox events: %w", err)
 	}

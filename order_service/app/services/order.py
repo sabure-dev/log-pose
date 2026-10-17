@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.domain import NewOrderItem, OrderEntity
 from app.enums import OrderStatus
-from app.exceptions import InvalidTransition, OrderNotFound
+from app.exceptions import IdempotencyConflict, InvalidTransition, OrderNotFound
 from app.interfaces import AbstractUnitOfWork
 from app.logging import correlation_id_ctx
 
@@ -18,6 +18,32 @@ VALID_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
     OrderStatus.COMPLETED: set(),
     OrderStatus.CANCELLED: set(),
 }
+
+
+def _normalize_idempotency_key(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    stripped = raw.strip()
+    return stripped if stripped else None
+
+
+def _matches_idempotent_request(
+    existing: OrderEntity,
+    items: Sequence[NewOrderItem],
+    shipping_address: str | None,
+) -> bool:
+    if existing.shipping_address != shipping_address:
+        return False
+    if len(existing.items) != len(items):
+        return False
+    existing_sig = sorted(
+        (str(it.product_id), it.quantity, Decimal(str(it.price)))
+        for it in existing.items
+    )
+    requested_sig = sorted(
+        (str(it.product_id), it.quantity, Decimal(str(it.price))) for it in items
+    )
+    return existing_sig == requested_sig
 
 
 class OrderService:
@@ -31,16 +57,24 @@ class OrderService:
         shipping_address: str | None = None,
         idempotency_key: str | None = None,
     ) -> OrderEntity:
+        normalized_key = _normalize_idempotency_key(idempotency_key)
         total_amount = sum(
             (item.price * item.quantity for item in items), Decimal("0.00")
         )
 
         async with self.uow:
-            if idempotency_key:
+            if normalized_key:
                 existing = await self.uow.orders.get_by_user_and_idempotency_key(
-                    user_id, idempotency_key
+                    user_id, normalized_key
                 )
                 if existing:
+                    if not _matches_idempotent_request(
+                        existing, items, shipping_address
+                    ):
+                        raise IdempotencyConflict(
+                            "Idempotency-Key already used with "
+                            "different order parameters"
+                        )
                     return existing
 
             try:
@@ -49,15 +83,22 @@ class OrderService:
                     total_amount,
                     items,
                     shipping_address,
-                    idempotency_key=idempotency_key,
+                    idempotency_key=normalized_key,
                 )
             except IntegrityError:
                 await self.uow.rollback()
-                if idempotency_key:
+                if normalized_key:
                     existing = await self.uow.orders.get_by_user_and_idempotency_key(
-                        user_id, idempotency_key
+                        user_id, normalized_key
                     )
                     if existing:
+                        if not _matches_idempotent_request(
+                            existing, items, shipping_address
+                        ):
+                            raise IdempotencyConflict(
+                                "Idempotency-Key already used with "
+                                "different order parameters"
+                            )
                         return existing
                 raise
 
@@ -107,6 +148,7 @@ class OrderService:
         user_id: uuid.UUID,
         reason: str = "cancelled by user",
     ) -> OrderEntity:
+        truncated_reason = reason[:500] if reason else "cancelled by user"
         async with self.uow:
             order = await self.uow.orders.get_for_update(order_id)
             if not order or order.user_id != user_id:
@@ -124,17 +166,21 @@ class OrderService:
                 )
 
             updated_order = await self.uow.orders.update_status(
-                order_id, OrderStatus.CANCELLED, cancellation_reason=reason
+                order_id,
+                OrderStatus.CANCELLED,
+                cancellation_reason=truncated_reason,
             )
             await self._emit_cancelled(order)
 
             await self.uow.commit()
             return updated_order or order
 
-    async def ship_order(self, order_id: uuid.UUID, user_id: uuid.UUID) -> OrderEntity:
+    async def ship_order(
+        self, order_id: uuid.UUID, user_id: uuid.UUID | None = None
+    ) -> OrderEntity:
         async with self.uow:
             order = await self.uow.orders.get_for_update(order_id)
-            if not order or order.user_id != user_id:
+            if not order or (user_id is not None and order.user_id != user_id):
                 raise OrderNotFound(f"Order {order_id} not found")
 
             current_status = order.status
@@ -156,11 +202,11 @@ class OrderService:
             return updated_order or order
 
     async def complete_order(
-        self, order_id: uuid.UUID, user_id: uuid.UUID
+        self, order_id: uuid.UUID, user_id: uuid.UUID | None = None
     ) -> OrderEntity:
         async with self.uow:
             order = await self.uow.orders.get_for_update(order_id)
-            if not order or order.user_id != user_id:
+            if not order or (user_id is not None and order.user_id != user_id):
                 raise OrderNotFound(f"Order {order_id} not found")
 
             current_status = order.status
@@ -203,7 +249,9 @@ class OrderService:
                     f"{current_status.value} to {status.value}"
                 )
 
-            cancellation_reason = reason if status == OrderStatus.CANCELLED else None
+            cancellation_reason = (
+                reason[:500] if (status == OrderStatus.CANCELLED and reason) else None
+            )
             updated_order = await self.uow.orders.update_status(
                 order_id, status, cancellation_reason=cancellation_reason
             )

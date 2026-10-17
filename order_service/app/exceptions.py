@@ -8,3 +8,7 @@ class InvalidTransition(DomainError):
 
 class OrderNotFound(DomainError):
     pass
+
+
+class IdempotencyConflict(DomainError):
+    pass

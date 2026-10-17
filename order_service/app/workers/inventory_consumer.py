@@ -19,6 +19,7 @@ from app.services.order import OrderService
 logger = logging.getLogger(__name__)
 
 MAX_DELIVERY_ATTEMPTS = 3
+RETRY_DELAY_SECONDS = 2.0
 MAIN_QUEUE_NAME = "orders_inventory_events_queue"
 RETRY_QUEUE_NAME = "orders_inventory_events_retry_queue"
 DLQ_QUEUE_NAME = "orders_inventory_events_dlq"
@@ -48,11 +49,10 @@ async def _retry_or_dead_letter(
         await message.reject(requeue=False)
         return
 
-    backoff_ms = 1000 * (1 << (attempts - 1))
     logger.warning(
         f"Transient error processing order {order_id_str} "
         f"(attempt {attempts}/{MAX_DELIVERY_ATTEMPTS}), "
-        f"scheduling retry in {backoff_ms}ms: {err}"
+        f"scheduling retry in {RETRY_DELAY_SECONDS}s: {err}"
     )
 
     if channel is None:
@@ -71,7 +71,7 @@ async def _retry_or_dead_letter(
             headers=headers,
             delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
             content_type="application/json",
-            expiration=backoff_ms / 1000.0,
+            expiration=RETRY_DELAY_SECONDS,
         )
         await channel.default_exchange.publish(
             retry_msg,
@@ -164,8 +164,8 @@ async def run_inventory_consumer() -> None:
             name="logpose_dlx", type=aio_pika.ExchangeType.TOPIC, durable=True
         )
         dlq = await channel.declare_queue(name=DLQ_QUEUE_NAME, durable=True)
-        await dlq.bind(dlx_exchange, routing_key=DLQ_QUEUE_NAME)
-        await dlq.bind(dlx_exchange, routing_key="inventory.#")
+        for dlq_key in (DLQ_QUEUE_NAME, MAIN_QUEUE_NAME, "inventory.#"):
+            await dlq.bind(dlx_exchange, routing_key=dlq_key)
 
         await channel.declare_queue(
             name=RETRY_QUEUE_NAME,

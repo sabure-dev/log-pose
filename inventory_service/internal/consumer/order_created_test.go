@@ -4,13 +4,25 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"inventory_service/internal/domain"
 	"inventory_service/internal/repository"
 )
+
+type stubDeferredConfirm struct {
+	ok  bool
+	err error
+}
+
+func (s stubDeferredConfirm) WaitContext(ctx context.Context) (bool, error) {
+	return s.ok, s.err
+}
 
 type mockAcknowledger struct {
 	acked   bool
@@ -44,6 +56,11 @@ type publishedCall struct {
 type mockAMQPChannel struct {
 	published  []publishedCall
 	publishErr error
+	confirmOK  bool
+}
+
+func newMockAMQPChannel() *mockAMQPChannel {
+	return &mockAMQPChannel{confirmOK: true}
 }
 
 func (m *mockAMQPChannel) ExchangeDeclare(name, kind string, durable, autoDelete, internal, noWait bool, args amqp.Table) error {
@@ -62,6 +79,10 @@ func (m *mockAMQPChannel) Qos(prefetchCount, prefetchSize int, global bool) erro
 	return nil
 }
 
+func (m *mockAMQPChannel) Confirm(noWait bool) error {
+	return nil
+}
+
 func (m *mockAMQPChannel) Consume(queue, consumer string, autoAck, exclusive, noLocal, noWait bool, args amqp.Table) (<-chan amqp.Delivery, error) {
 	return nil, nil
 }
@@ -70,16 +91,32 @@ func (m *mockAMQPChannel) NotifyClose(c chan *amqp.Error) chan *amqp.Error {
 	return c
 }
 
-func (m *mockAMQPChannel) PublishWithContext(ctx context.Context, exchange, key string, mandatory, immediate bool, msg amqp.Publishing) error {
+func (m *mockAMQPChannel) PublishWithDeferredConfirmWithContext(ctx context.Context, exchange, key string, mandatory, immediate bool, msg amqp.Publishing) (*amqp.DeferredConfirmation, error) {
 	if m.publishErr != nil {
-		return m.publishErr
+		return nil, m.publishErr
 	}
 	m.published = append(m.published, publishedCall{
 		exchange:   exchange,
 		routingKey: key,
 		msg:        msg,
 	})
-	return nil
+	return nil, nil
+}
+
+func newConsumerWithMockChannel(mockCh *mockAMQPChannel, res repository.Reserver) *OrderConsumer {
+	c := NewOrderConsumer(mockCh, res)
+	c.SetRetryPublisher(func(ctx context.Context, exchange, key string, mandatory, immediate bool, msg amqp.Publishing) (DeferredConfirmation, error) {
+		if mockCh.publishErr != nil {
+			return nil, mockCh.publishErr
+		}
+		mockCh.published = append(mockCh.published, publishedCall{
+			exchange:   exchange,
+			routingKey: key,
+			msg:        msg,
+		})
+		return stubDeferredConfirm{ok: mockCh.confirmOK, err: nil}, nil
+	})
+	return c
 }
 
 type mockReserver struct {
@@ -111,9 +148,9 @@ func (m *mockReserver) Confirm(ctx context.Context, event domain.OrderCompletedE
 
 func TestOrderConsumer_HandleOrderCreated_Success(t *testing.T) {
 	mockAck := &mockAcknowledger{}
-	mockCh := &mockAMQPChannel{}
+	mockCh := newMockAMQPChannel()
 	mockRes := &mockReserver{}
-	c := NewOrderConsumer(mockCh, mockRes)
+	c := newConsumerWithMockChannel(mockCh, mockRes)
 
 	event := domain.OrderCreatedEvent{
 		EventID: uuid.New(),
@@ -136,7 +173,7 @@ func TestOrderConsumer_HandleOrderCreated_Success(t *testing.T) {
 
 func TestOrderConsumer_HandleOrderCreated_MalformedJSON(t *testing.T) {
 	mockAck := &mockAcknowledger{}
-	c := NewOrderConsumer(&mockAMQPChannel{}, &mockReserver{})
+	c := newConsumerWithMockChannel(newMockAMQPChannel(), &mockReserver{})
 
 	d := amqp.Delivery{
 		Acknowledger: mockAck,
@@ -168,7 +205,7 @@ func TestOrderConsumer_HandleOrderCreated_DomainRejections(t *testing.T) {
 				return domainErr
 			},
 		}
-		c := NewOrderConsumer(&mockAMQPChannel{}, mockRes)
+		c := newConsumerWithMockChannel(newMockAMQPChannel(), mockRes)
 
 		event := domain.OrderCreatedEvent{
 			EventID: uuid.New(),
@@ -203,10 +240,10 @@ func TestOrderConsumer_RetryOrDeadLetter_DelayedRetryAndDLQ(t *testing.T) {
 	}
 	body, _ := json.Marshal(event)
 
-	// Attempt 1: publishes to retryQueueName via default exchange "" with Expiration="1000" and x-retry-count=1
+	// Attempt 1: publishes to retryQueueName via default exchange "" with Expiration="2000" and x-retry-count=1
 	mockAck1 := &mockAcknowledger{}
-	mockCh1 := &mockAMQPChannel{}
-	c1 := NewOrderConsumer(mockCh1, mockRes)
+	mockCh1 := newMockAMQPChannel()
+	c1 := newConsumerWithMockChannel(mockCh1, mockRes)
 
 	d1 := amqp.Delivery{
 		Acknowledger: mockAck1,
@@ -216,7 +253,7 @@ func TestOrderConsumer_RetryOrDeadLetter_DelayedRetryAndDLQ(t *testing.T) {
 	c1.handleDelivery(context.Background(), d1)
 
 	if !mockAck1.acked {
-		t.Fatalf("expected original message to be acked after publishing to retry queue")
+		t.Fatalf("expected original message to be acked after confirmed publish to retry queue")
 	}
 	if len(mockCh1.published) != 1 {
 		t.Fatalf("expected 1 retry publish, got %d", len(mockCh1.published))
@@ -225,8 +262,8 @@ func TestOrderConsumer_RetryOrDeadLetter_DelayedRetryAndDLQ(t *testing.T) {
 	if pub1.exchange != "" || pub1.routingKey != retryQueueName {
 		t.Errorf("expected retry published to default exchange '' and key %q, got exchange=%q key=%q", retryQueueName, pub1.exchange, pub1.routingKey)
 	}
-	if pub1.msg.Expiration != "1000" {
-		t.Errorf("expected 1000ms expiration on attempt 1, got %q", pub1.msg.Expiration)
+	if pub1.msg.Expiration != "2000" {
+		t.Errorf("expected 2000ms expiration, got %q", pub1.msg.Expiration)
 	}
 	if pub1.msg.Headers["x-retry-count"] != int32(1) {
 		t.Errorf("expected x-retry-count=1, got %v", pub1.msg.Headers["x-retry-count"])
@@ -237,8 +274,8 @@ func TestOrderConsumer_RetryOrDeadLetter_DelayedRetryAndDLQ(t *testing.T) {
 
 	// Attempt 3 (x-retry-count=2 already): reaches maxDeliveryAttempts (3), sends to DLQ via Nack(requeue=false)
 	mockAck3 := &mockAcknowledger{}
-	mockCh3 := &mockAMQPChannel{}
-	c3 := NewOrderConsumer(mockCh3, mockRes)
+	mockCh3 := newMockAMQPChannel()
+	c3 := newConsumerWithMockChannel(mockCh3, mockRes)
 
 	d3 := amqp.Delivery{
 		Acknowledger: mockAck3,
@@ -262,7 +299,7 @@ func TestOrderConsumer_RetryOrDeadLetter_DelayedRetryAndDLQ(t *testing.T) {
 func TestOrderConsumer_HandleOrderCancelled_Success(t *testing.T) {
 	mockAck := &mockAcknowledger{}
 	mockRes := &mockReserver{}
-	c := NewOrderConsumer(&mockAMQPChannel{}, mockRes)
+	c := newConsumerWithMockChannel(newMockAMQPChannel(), mockRes)
 
 	event := domain.OrderCancelledEvent{
 		EventID: uuid.New(),
@@ -292,7 +329,7 @@ func TestOrderConsumer_HandleOrderCompleted_Success(t *testing.T) {
 			return nil
 		},
 	}
-	c := NewOrderConsumer(&mockAMQPChannel{}, mockRes)
+	c := newConsumerWithMockChannel(newMockAMQPChannel(), mockRes)
 
 	event := domain.OrderCompletedEvent{
 		EventID: uuid.New(),
@@ -310,5 +347,107 @@ func TestOrderConsumer_HandleOrderCompleted_Success(t *testing.T) {
 
 	if !confirmed || !mockAck.acked {
 		t.Errorf("expected order.completed to call Confirm and Ack")
+	}
+}
+
+// TestOrderConsumer_AMQPTopology_RetryAndDLQ_Integration verifies against a live RabbitMQ broker
+// that a transient failure retries through retryQueueName and, after 3 failed attempts,
+// actually lands in inventory_order_events_dlq (even though its routing key changed to mainQueueName).
+func TestOrderConsumer_AMQPTopology_RetryAndDLQ_Integration(t *testing.T) {
+	rmqURL := os.Getenv("TEST_RABBITMQ_URL")
+	if rmqURL == "" {
+		t.Skip("TEST_RABBITMQ_URL not set, skipping live RabbitMQ topology integration test")
+	}
+
+	conn, err := amqp.Dial(rmqURL)
+	if err != nil {
+		t.Fatalf("failed to connect to rabbitmq: %v", err)
+	}
+	defer conn.Close()
+
+	setupCh, err := conn.Channel()
+	if err != nil {
+		t.Fatalf("failed to open setup channel: %v", err)
+	}
+	defer setupCh.Close()
+
+	// Clean queues before test
+	_, _ = setupCh.QueueDelete(mainQueueName, false, false, false)
+	_, _ = setupCh.QueueDelete(retryQueueName, false, false, false)
+	_, _ = setupCh.QueueDelete(dlqQueueName, false, false, false)
+
+	var attempts atomic.Int32
+	mockRes := &mockReserver{
+		reserveFunc: func(ctx context.Context, event domain.OrderCreatedEvent) error {
+			attempts.Add(1)
+			return errors.New("simulated transient database outage")
+		},
+	}
+
+	consumerCh, err := conn.Channel()
+	if err != nil {
+		t.Fatalf("failed to open consumer channel: %v", err)
+	}
+	defer consumerCh.Close()
+
+	c := NewOrderConsumer(consumerCh, mockRes)
+	c.SetRetryDelayMs(50) // Fast 50ms retry TTL for integration test
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- c.Run(ctx)
+	}()
+
+	// Wait briefly for consumer topology declaration
+	time.Sleep(150 * time.Millisecond)
+
+	orderID := uuid.New()
+	ev := domain.OrderCreatedEvent{
+		EventID:   uuid.New(),
+		EventType: "OrderCreated",
+		OrderID:   orderID,
+		UserID:    uuid.New(),
+	}
+	body, _ := json.Marshal(ev)
+
+	err = setupCh.PublishWithContext(
+		ctx,
+		"logpose_events",
+		"order.created",
+		false,
+		false,
+		amqp.Publishing{
+			ContentType:  "application/json",
+			DeliveryMode: amqp.Persistent,
+			MessageId:    ev.EventID.String(),
+			Body:         body,
+		},
+	)
+	if err != nil {
+		t.Fatalf("failed to publish test event: %v", err)
+	}
+
+	dlqMsgs, err := setupCh.Consume(dlqQueueName, "", true, false, false, false, nil)
+	if err != nil {
+		t.Fatalf("failed to consume from DLQ: %v", err)
+	}
+
+	select {
+	case msg := <-dlqMsgs:
+		var dlqEv domain.OrderCreatedEvent
+		if err := json.Unmarshal(msg.Body, &dlqEv); err != nil {
+			t.Fatalf("failed to unmarshal DLQ message: %v", err)
+		}
+		if dlqEv.OrderID != orderID {
+			t.Fatalf("expected DLQ message OrderID %s, got %s", orderID, dlqEv.OrderID)
+		}
+		if attempts.Load() != 3 {
+			t.Fatalf("expected exactly 3 delivery attempts before DLQ, got %d", attempts.Load())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for exhausted message to arrive in %s (attempts=%d)", dlqQueueName, attempts.Load())
 	}
 }

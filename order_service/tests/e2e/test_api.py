@@ -5,6 +5,7 @@ from pathlib import Path
 from httpx import AsyncClient
 from sqlalchemy import text
 
+from app.config import settings
 from app.enums import OrderStatus
 from app.repositories.uow import SqlAlchemyUnitOfWork
 from app.services.order import OrderService
@@ -28,7 +29,7 @@ async def test_create_order_endpoint(async_client: AsyncClient, db_session):
             {
                 "product_id": "123e4567-e89b-12d3-a456-426614174000",
                 "quantity": 1,
-                "price": "300.00",
+                "expected_price": "300.00",
             },
         ],
         "shipping_address": "Main Street 10",
@@ -68,12 +69,15 @@ async def test_create_order_endpoint(async_client: AsyncClient, db_session):
     assert "correlation_id" in payload_data
 
 
-async def test_create_order_idempotency_key(async_client: AsyncClient, db_session):
+async def test_create_order_idempotency_key_and_conflict(
+    async_client: AsyncClient, db_session
+):
     user_id = str(uuid.uuid4())
+    product_id = str(uuid.uuid4())
     payload = {
         "items": [
             {
-                "product_id": str(uuid.uuid4()),
+                "product_id": product_id,
                 "quantity": 1,
                 "price": "150.00",
             }
@@ -91,6 +95,35 @@ async def test_create_order_idempotency_key(async_client: AsyncClient, db_sessio
 
     result = await db_session.execute(text("SELECT * FROM outbox_events"))
     assert len(result.mappings().all()) == 1
+
+    # Reusing same Idempotency-Key with different payload must return 409 Conflict
+    conflicting_payload = {
+        "items": [
+            {
+                "product_id": product_id,
+                "quantity": 5,
+                "price": "150.00",
+            }
+        ],
+        "shipping_address": "Idempotent Way 1",
+    }
+    resp_conflict = await async_client.post(
+        "/orders/", json=conflicting_payload, headers=headers
+    )
+    assert resp_conflict.status_code == 409
+
+    # Two requests with empty Idempotency-Key:
+    # "" must be normalized to None and create 2 distinct orders without 500
+    empty_key_headers = {"X-User-Id": user_id, "Idempotency-Key": "   "}
+    resp_empty1 = await async_client.post(
+        "/orders/", json=payload, headers=empty_key_headers
+    )
+    resp_empty2 = await async_client.post(
+        "/orders/", json=payload, headers=empty_key_headers
+    )
+    assert resp_empty1.status_code == 201
+    assert resp_empty2.status_code == 201
+    assert resp_empty1.json()["id"] != resp_empty2.json()["id"]
 
 
 async def test_missing_user_id_header_returns_422(async_client: AsyncClient):
@@ -208,7 +241,9 @@ async def test_cancel_order_endpoint(async_client: AsyncClient):
     assert cancel_resp.json()["cancellation_reason"] == "cancelled by user"
 
 
-async def test_ship_and_complete_order_endpoints(async_client: AsyncClient, db_session):
+async def test_ship_and_complete_order_endpoints_require_operator_auth(
+    async_client: AsyncClient, db_session
+):
     user_id = str(uuid.uuid4())
     payload = {
         "items": [{"product_id": str(uuid.uuid4()), "quantity": 2, "price": "50.00"}]
@@ -218,10 +253,19 @@ async def test_ship_and_complete_order_endpoints(async_client: AsyncClient, db_s
     )
     order_id = uuid.UUID(create_resp.json()["id"])
 
-    # Cannot ship while still PENDING
-    ship_early = await async_client.post(
+    # Regular customer without X-Internal-Token or operator role gets 403 Forbidden
+    forbidden_ship = await async_client.post(
         f"/orders/{order_id}/ship", headers={"X-User-Id": user_id}
     )
+    assert forbidden_ship.status_code == 403
+
+    op_headers = {
+        "X-User-Id": user_id,
+        "X-Internal-Token": settings.internal_api_token,
+    }
+
+    # Cannot ship while still PENDING
+    ship_early = await async_client.post(f"/orders/{order_id}/ship", headers=op_headers)
     assert ship_early.status_code == 409
 
     # Transition to RESERVED (simulating inventory.reserved consumer)
@@ -229,14 +273,13 @@ async def test_ship_and_complete_order_endpoints(async_client: AsyncClient, db_s
     service = OrderService(uow=uow)
     await service.update_order_status(order_id, OrderStatus.RESERVED)
 
-    ship_resp = await async_client.post(
-        f"/orders/{order_id}/ship", headers={"X-User-Id": user_id}
-    )
+    ship_resp = await async_client.post(f"/orders/{order_id}/ship", headers=op_headers)
     assert ship_resp.status_code == 200
     assert ship_resp.json()["status"] == OrderStatus.READY_FOR_SHIPPING.value
 
     complete_resp = await async_client.post(
-        f"/orders/{order_id}/complete", headers={"X-User-Id": user_id}
+        f"/orders/{order_id}/complete",
+        headers={"X-User-Role": "warehouse"},
     )
     assert complete_resp.status_code == 200
     assert complete_resp.json()["status"] == OrderStatus.COMPLETED.value
@@ -271,6 +314,10 @@ async def test_emitted_outbox_payloads_match_contract_schemas(
         completed_contract = json.load(f)
 
     user_id = str(uuid.uuid4())
+    op_headers = {
+        "X-User-Id": user_id,
+        "X-Internal-Token": settings.internal_api_token,
+    }
     payload = {
         "items": [
             {
@@ -290,10 +337,8 @@ async def test_emitted_outbox_payloads_match_contract_schemas(
     uow = SqlAlchemyUnitOfWork(session=db_session)
     service = OrderService(uow=uow)
     await service.update_order_status(order_id, OrderStatus.RESERVED)
-    await async_client.post(f"/orders/{order_id}/ship", headers={"X-User-Id": user_id})
-    await async_client.post(
-        f"/orders/{order_id}/complete", headers={"X-User-Id": user_id}
-    )
+    await async_client.post(f"/orders/{order_id}/ship", headers=op_headers)
+    await async_client.post(f"/orders/{order_id}/complete", headers=op_headers)
 
     # Create a second order and cancel it
     resp2 = await async_client.post(
