@@ -6,6 +6,14 @@ from httpx import AsyncClient
 from sqlalchemy import text
 
 from app.enums import OrderStatus
+from app.repositories.uow import SqlAlchemyUnitOfWork
+from app.services.order import OrderService
+
+
+async def test_healthcheck_endpoint(async_client: AsyncClient):
+    response = await async_client.get("/orders/healthcheck")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
 
 
 async def test_create_order_endpoint(async_client: AsyncClient, db_session):
@@ -58,6 +66,31 @@ async def test_create_order_endpoint(async_client: AsyncClient, db_session):
     assert "event_id" in payload_data
     assert "occurred_at" in payload_data
     assert "correlation_id" in payload_data
+
+
+async def test_create_order_idempotency_key(async_client: AsyncClient, db_session):
+    user_id = str(uuid.uuid4())
+    payload = {
+        "items": [
+            {
+                "product_id": str(uuid.uuid4()),
+                "quantity": 1,
+                "price": "150.00",
+            }
+        ],
+        "shipping_address": "Idempotent Way 1",
+    }
+    headers = {"X-User-Id": user_id, "Idempotency-Key": "order-req-001"}
+
+    resp1 = await async_client.post("/orders/", json=payload, headers=headers)
+    resp2 = await async_client.post("/orders/", json=payload, headers=headers)
+
+    assert resp1.status_code == 201
+    assert resp2.status_code == 201
+    assert resp1.json()["id"] == resp2.json()["id"]
+
+    result = await db_session.execute(text("SELECT * FROM outbox_events"))
+    assert len(result.mappings().all()) == 1
 
 
 async def test_missing_user_id_header_returns_422(async_client: AsyncClient):
@@ -172,6 +205,41 @@ async def test_cancel_order_endpoint(async_client: AsyncClient):
 
     assert cancel_resp.status_code == 200
     assert cancel_resp.json()["status"] == OrderStatus.CANCELLED.value
+    assert cancel_resp.json()["cancellation_reason"] == "cancelled by user"
+
+
+async def test_ship_and_complete_order_endpoints(async_client: AsyncClient, db_session):
+    user_id = str(uuid.uuid4())
+    payload = {
+        "items": [{"product_id": str(uuid.uuid4()), "quantity": 2, "price": "50.00"}]
+    }
+    create_resp = await async_client.post(
+        "/orders/", json=payload, headers={"X-User-Id": user_id}
+    )
+    order_id = uuid.UUID(create_resp.json()["id"])
+
+    # Cannot ship while still PENDING
+    ship_early = await async_client.post(
+        f"/orders/{order_id}/ship", headers={"X-User-Id": user_id}
+    )
+    assert ship_early.status_code == 409
+
+    # Transition to RESERVED (simulating inventory.reserved consumer)
+    uow = SqlAlchemyUnitOfWork(session=db_session)
+    service = OrderService(uow=uow)
+    await service.update_order_status(order_id, OrderStatus.RESERVED)
+
+    ship_resp = await async_client.post(
+        f"/orders/{order_id}/ship", headers={"X-User-Id": user_id}
+    )
+    assert ship_resp.status_code == 200
+    assert ship_resp.json()["status"] == OrderStatus.READY_FOR_SHIPPING.value
+
+    complete_resp = await async_client.post(
+        f"/orders/{order_id}/complete", headers={"X-User-Id": user_id}
+    )
+    assert complete_resp.status_code == 200
+    assert complete_resp.json()["status"] == OrderStatus.COMPLETED.value
 
 
 async def test_cancel_other_users_order_returns_404(async_client: AsyncClient):
@@ -191,17 +259,69 @@ async def test_cancel_other_users_order_returns_404(async_client: AsyncClient):
     assert cancel_resp.status_code == 404
 
 
-async def test_contracts_schema_matches_order_created():
-    contract_path = (
-        Path(__file__).parent.parent.parent.parent
-        / "docs"
-        / "contracts"
-        / "order_created.json"
+async def test_emitted_outbox_payloads_match_contract_schemas(
+    async_client: AsyncClient, db_session
+):
+    contracts_dir = Path(__file__).parent.parent.parent.parent / "docs" / "contracts"
+    with open(contracts_dir / "order_created.json") as f:
+        created_contract = json.load(f)
+    with open(contracts_dir / "order_cancelled.json") as f:
+        cancelled_contract = json.load(f)
+    with open(contracts_dir / "order_completed.json") as f:
+        completed_contract = json.load(f)
+
+    user_id = str(uuid.uuid4())
+    payload = {
+        "items": [
+            {
+                "product_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                "quantity": 2,
+                "price": "1500.50",
+            }
+        ],
+        "shipping_address": "Main Street 100, Apt 4B",
+    }
+    resp = await async_client.post(
+        "/orders/", json=payload, headers={"X-User-Id": user_id}
     )
-    with open(contract_path) as f:
-        data = json.load(f)
-    assert data["event_type"] == "OrderCreated"
-    assert "event_id" in data
-    assert "correlation_id" in data
-    assert "total_amount" in data
-    assert "items" in data
+    order_id = uuid.UUID(resp.json()["id"])
+
+    # Transition to RESERVED -> READY_FOR_SHIPPING -> COMPLETED
+    uow = SqlAlchemyUnitOfWork(session=db_session)
+    service = OrderService(uow=uow)
+    await service.update_order_status(order_id, OrderStatus.RESERVED)
+    await async_client.post(f"/orders/{order_id}/ship", headers={"X-User-Id": user_id})
+    await async_client.post(
+        f"/orders/{order_id}/complete", headers={"X-User-Id": user_id}
+    )
+
+    # Create a second order and cancel it
+    resp2 = await async_client.post(
+        "/orders/", json=payload, headers={"X-User-Id": user_id}
+    )
+    order2_id = resp2.json()["id"]
+    await async_client.post(
+        f"/orders/{order2_id}/cancel", headers={"X-User-Id": user_id}
+    )
+
+    result = await db_session.execute(
+        text("SELECT topic, payload FROM outbox_events ORDER BY created_at ASC")
+    )
+    rows = result.mappings().all()
+    by_topic = {row["topic"]: json.loads(row["payload"]) for row in rows}
+
+    assert set(by_topic["order.created"].keys()) == set(created_contract.keys())
+    assert set(by_topic["order.created"]["items"][0].keys()) == set(
+        created_contract["items"][0].keys()
+    )
+    assert by_topic["order.created"]["total_amount"] == "3001.00"
+
+    assert set(by_topic["order.cancelled"].keys()) == set(cancelled_contract.keys())
+    assert set(by_topic["order.cancelled"]["items"][0].keys()) == set(
+        cancelled_contract["items"][0].keys()
+    )
+
+    assert set(by_topic["order.completed"].keys()) == set(completed_contract.keys())
+    assert set(by_topic["order.completed"]["items"][0].keys()) == set(
+        completed_contract["items"][0].keys()
+    )

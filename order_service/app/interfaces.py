@@ -1,5 +1,6 @@
 import uuid
 from abc import ABC, abstractmethod
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Sequence
 
@@ -15,6 +16,7 @@ class AbstractOrderRepository(ABC):
         total_amount: Decimal,
         items_data: Sequence[NewOrderItem],
         shipping_address: str | None = None,
+        idempotency_key: str | None = None,
     ) -> OrderEntity:
         raise NotImplementedError
 
@@ -27,8 +29,17 @@ class AbstractOrderRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def get_by_user_and_idempotency_key(
+        self, user_id: uuid.UUID, idempotency_key: str
+    ) -> OrderEntity | None:
+        raise NotImplementedError
+
+    @abstractmethod
     async def update_status(
-        self, order_id: uuid.UUID, status: OrderStatus
+        self,
+        order_id: uuid.UUID,
+        status: OrderStatus,
+        cancellation_reason: str | None = None,
     ) -> OrderEntity | None:
         raise NotImplementedError
 
@@ -41,6 +52,12 @@ class AbstractOrderRepository(ABC):
     @abstractmethod
     async def get_all_by_user(
         self, user_id: uuid.UUID, skip: int = 0, limit: int = 100
+    ) -> Sequence[OrderEntity]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_stale_pending_orders(
+        self, older_than: datetime, limit: int = 50
     ) -> Sequence[OrderEntity]:
         raise NotImplementedError
 

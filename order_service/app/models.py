@@ -2,7 +2,20 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Numeric, String, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -17,12 +30,22 @@ class OutboxEvent(Base):
     topic: Mapped[str] = mapped_column(String(255), nullable=False)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
     processed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 
     __table_args__ = (
-        Index("ix_outbox_events_processed_created_at", "processed", "created_at"),
+        Index(
+            "ix_outbox_events_unprocessed_created_at",
+            "created_at",
+            postgresql_where=text("processed = false"),
+            sqlite_where=text("processed = 0"),
+        ),
     )
 
 
@@ -44,6 +67,8 @@ class Order(Base):
     )
 
     shipping_address: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    cancellation_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -54,6 +79,12 @@ class Order(Base):
 
     items: Mapped[list["OrderItem"]] = relationship(
         "OrderItem", back_populates="order", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "idempotency_key", name="uq_orders_user_idempotency_key"
+        ),
     )
 
 

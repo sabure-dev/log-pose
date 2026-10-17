@@ -1,9 +1,12 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import OrderServiceDep, UserIdDep
+from app.database import get_db
 from app.domain import NewOrderItem
 from app.exceptions import InvalidTransition, OrderNotFound
 from app.schemas import OrderCreate, OrderRead
@@ -12,7 +15,14 @@ router = APIRouter(prefix="/orders", tags=["Orders"])
 
 
 @router.get("/healthcheck", status_code=status.HTTP_200_OK)
-async def healthcheck():
+async def healthcheck(db: AsyncSession = Depends(get_db)):
+    try:
+        await db.execute(text("SELECT 1"))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database unavailable",
+        ) from exc
     return {"status": "ok"}
 
 
@@ -21,6 +31,14 @@ async def create_order(
     order_in: OrderCreate,
     service: OrderServiceDep,
     current_user_id: UserIdDep,
+    idempotency_key: Annotated[
+        str | None,
+        Header(
+            alias="Idempotency-Key",
+            max_length=255,
+            description="Optional idempotency key to prevent duplicate order creation",
+        ),
+    ] = None,
 ) -> OrderRead:
     domain_items = [
         NewOrderItem(
@@ -31,7 +49,10 @@ async def create_order(
         for item in order_in.items
     ]
     order = await service.create_new_order(
-        current_user_id, domain_items, order_in.shipping_address
+        current_user_id,
+        domain_items,
+        order_in.shipping_address,
+        idempotency_key=idempotency_key,
     )
     return OrderRead.model_validate(order)
 
@@ -71,6 +92,44 @@ async def cancel_order(
 ):
     try:
         order = await service.cancel_order(order_id, current_user_id)
+        return OrderRead.model_validate(order)
+    except OrderNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Order not found"
+        )
+    except InvalidTransition as err:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(err))
+
+
+@router.post(
+    "/{order_id}/ship", response_model=OrderRead, status_code=status.HTTP_200_OK
+)
+async def ship_order(
+    order_id: uuid.UUID,
+    service: OrderServiceDep,
+    current_user_id: UserIdDep,
+):
+    try:
+        order = await service.ship_order(order_id, current_user_id)
+        return OrderRead.model_validate(order)
+    except OrderNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Order not found"
+        )
+    except InvalidTransition as err:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(err))
+
+
+@router.post(
+    "/{order_id}/complete", response_model=OrderRead, status_code=status.HTTP_200_OK
+)
+async def complete_order(
+    order_id: uuid.UUID,
+    service: OrderServiceDep,
+    current_user_id: UserIdDep,
+):
+    try:
+        order = await service.complete_order(order_id, current_user_id)
         return OrderRead.model_validate(order)
     except OrderNotFound:
         raise HTTPException(

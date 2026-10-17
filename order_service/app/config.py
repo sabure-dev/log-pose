@@ -11,11 +11,12 @@ class Settings(BaseSettings):
     db_host: str = "localhost"
     db_port: int = 5432
     db_name: str = "orders_db"
-    db_user: str = "user"
-    db_pass: str = "pass"
+    db_user: str = "orders_user"
+    db_pass: str = "orders_password"
     db_echo: bool = False
 
     rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
+    pending_order_timeout_seconds: int = 900
 
     @computed_field
     @property

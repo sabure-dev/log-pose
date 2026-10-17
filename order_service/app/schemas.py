@@ -45,6 +45,7 @@ class OrderRead(BaseModel):
     status: OrderStatus
     total_amount: Decimal
     shipping_address: str | None = None
+    cancellation_reason: str | None = None
     created_at: datetime
     updated_at: datetime
     items: list[OrderItemRead]
