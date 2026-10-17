@@ -2,26 +2,40 @@ import asyncio
 import json
 import logging
 import signal
+from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
 import aio_pika
-from sqlalchemy import select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import async_session_maker, engine
-from app.logging import setup_logging
+from app.logging import correlation_id_ctx, setup_logging
 from app.models import OutboxEvent
+from app.repositories.uow import SqlAlchemyUnitOfWork
+from app.services.order import OrderService
 
 logger = logging.getLogger(__name__)
+
+MAX_OUTBOX_ATTEMPTS = 5
+PUBLISH_TIMEOUT_SECONDS = 5.0
 
 
 async def fetch_unprocessed_events(
     session: AsyncSession, batch_size: int = 50
 ) -> Sequence[OutboxEvent]:
+    now = datetime.now(timezone.utc)
     stmt = (
         select(OutboxEvent)
-        .where(OutboxEvent.processed.is_(False))
+        .where(
+            OutboxEvent.processed.is_(False),
+            OutboxEvent.attempts < MAX_OUTBOX_ATTEMPTS,
+            or_(
+                OutboxEvent.next_retry_at.is_(None),
+                OutboxEvent.next_retry_at <= now,
+            ),
+        )
         .order_by(OutboxEvent.created_at.asc())
         .limit(batch_size)
         .with_for_update(skip_locked=True)
@@ -39,21 +53,69 @@ async def process_outbox_batch(
     if not events:
         return 0
 
+    published_count = 0
     for event in events:
-        body = json.dumps(event.payload, default=str).encode("utf-8")
-        msg = aio_pika.Message(
-            body=body,
-            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-            message_id=str(event.id),
-            content_type="application/json",
+        corr_id = (
+            event.payload.get("correlation_id", "")
+            if isinstance(event.payload, dict)
+            else ""
         )
+        token = correlation_id_ctx.set(corr_id)
+        try:
+            body = json.dumps(event.payload, default=str).encode("utf-8")
+            msg = aio_pika.Message(
+                body=body,
+                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                message_id=str(event.id),
+                content_type="application/json",
+            )
 
-        await exchange.publish(msg, routing_key=event.topic, mandatory=True)
-        event.processed = True
-        logger.info(f"Event sent: {event.topic} (ID: {event.id})")
+            await exchange.publish(
+                msg,
+                routing_key=event.topic,
+                mandatory=True,
+                timeout=PUBLISH_TIMEOUT_SECONDS,
+            )
+            event.processed = True
+            event.last_error = None
+            published_count += 1
+            logger.info(f"Event sent: {event.topic} (ID: {event.id})")
+        except Exception as exc:
+            next_attempt = (event.attempts or 0) + 1
+            backoff_seconds = 1 << min(next_attempt, 6)
+            event.attempts = next_attempt
+            event.last_error = str(exc)
+            event.next_retry_at = datetime.now(timezone.utc) + timedelta(
+                seconds=backoff_seconds
+            )
+            if next_attempt >= MAX_OUTBOX_ATTEMPTS:
+                logger.error(
+                    f"Outbox event {event.id} ({event.topic}) parked after "
+                    f"{next_attempt} attempts: {exc}"
+                )
+            else:
+                logger.warning(
+                    f"Failed to publish outbox event {event.id} ({event.topic}), "
+                    f"attempt {next_attempt}/{MAX_OUTBOX_ATTEMPTS}: {exc}"
+                )
+        finally:
+            correlation_id_ctx.reset(token)
 
     await session.commit()
-    return len(events)
+    return published_count
+
+
+async def cleanup_processed_outbox_events(
+    session: AsyncSession, retention_days: int = 7
+) -> int:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    stmt = delete(OutboxEvent).where(
+        OutboxEvent.processed.is_(True),
+        OutboxEvent.created_at < cutoff,
+    )
+    result = await session.execute(stmt)
+    await session.commit()
+    return result.rowcount or 0
 
 
 async def run_outbox_relay():
@@ -66,6 +128,7 @@ async def run_outbox_relay():
         loop.add_signal_handler(sig, stop_event.set)
 
     connection = await aio_pika.connect_robust(settings.rabbitmq_url)
+    maintenance_counter = 0
     try:
         channel = await connection.channel(publisher_confirms=True)
         exchange = await channel.declare_exchange(
@@ -76,6 +139,19 @@ async def run_outbox_relay():
             try:
                 async with async_session_maker() as session:
                     processed_count = await process_outbox_batch(session, exchange)
+
+                    maintenance_counter += 1
+                    if maintenance_counter >= 30:
+                        maintenance_counter = 0
+                        uow = SqlAlchemyUnitOfWork(session=session)
+                        order_service = OrderService(uow=uow)
+                        expired = await order_service.expire_stale_pending_orders(
+                            timeout_seconds=settings.pending_order_timeout_seconds
+                        )
+                        if expired > 0:
+                            logger.info(f"Expired {expired} stale pending orders")
+                        await cleanup_processed_outbox_events(session)
+
                     if processed_count == 0:
                         try:
                             await asyncio.wait_for(stop_event.wait(), timeout=2.0)

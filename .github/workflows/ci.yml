@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [ "main" ]
 
+permissions:
+  contents: read
+
 jobs:
   python-test-and-lint:
     runs-on: ubuntu-latest
@@ -47,6 +50,20 @@ jobs:
 
   go-test-and-lint:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: inventory_test
+          POSTGRES_PASSWORD: inventory_test
+          POSTGRES_DB: inventory_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
     defaults:
       run:
         working-directory: ./inventory_service
@@ -64,5 +81,7 @@ jobs:
       - name: Go Vet
         run: go vet ./...
 
-      - name: Go Test
-        run: go test -v ./...
+      - name: Go Test (with Race Detector & PostgreSQL Integration)
+        env:
+          TEST_DATABASE_URL: "postgres://inventory_test:inventory_test@localhost:5432/inventory_test?sslmode=disable"
+        run: go test -race -p 1 -v ./...

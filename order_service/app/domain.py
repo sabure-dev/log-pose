@@ -31,3 +31,5 @@ class OrderEntity:
     created_at: datetime
     updated_at: datetime
     items: list[OrderItemEntity]
+    cancellation_reason: str | None = None
+    idempotency_key: str | None = None

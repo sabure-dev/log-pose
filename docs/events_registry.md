@@ -13,10 +13,11 @@
 ```json
 {
   "event_id": "8a0c2049-74d6-4e5a-8b1b-68936efc9df5",
+  "correlation_id": "c0a80101-0000-0000-0000-000000000001",
   "event_type": "OrderCreated",
   "order_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
   "user_id": "123e4567-e89b-12d3-a456-426614174000",
-  "total_amount": "3301.00",
+  "total_amount": "3001.00",
   "shipping_address": "Main Street 100, Apt 4B",
   "items": [
     {
@@ -40,6 +41,7 @@
 ```json
 {
   "event_id": "9b1c3059-85e7-5f6b-9c2c-79047efd0ea6",
+  "correlation_id": "c0a80101-0000-0000-0000-000000000001",
   "event_type": "OrderCancelled",
   "order_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
   "user_id": "123e4567-e89b-12d3-a456-426614174000",
@@ -50,6 +52,31 @@
     }
   ],
   "occurred_at": "2026-10-17T00:00:00.000000+00:00"
+}
+```
+
+### `order.completed`
+
+- **Exchange:** `logpose_events` (Topic)
+- **Routing Key:** `order.completed`
+- **Publisher:** `order_service`
+- **Consumer:** `inventory_service`
+
+**Payload (JSON):**
+```json
+{
+  "event_id": "7c2d4069-96f8-4a7c-8d3d-80158fae1fb7",
+  "correlation_id": "c0a80101-0000-0000-0000-000000000001",
+  "event_type": "OrderCompleted",
+  "order_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "user_id": "123e4567-e89b-12d3-a456-426614174000",
+  "items": [
+    {
+      "product_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "quantity": 2
+    }
+  ],
+  "occurred_at": "2026-10-17T01:00:00.000000+00:00"
 }
 ```
 
@@ -66,6 +93,7 @@
 ```json
 {
   "event_id": "1fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "correlation_id": "c0a80101-0000-0000-0000-000000000001",
   "event_type": "InventoryReservationResult",
   "order_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
   "status": "RESERVED"
@@ -83,6 +111,7 @@
 ```json
 {
   "event_id": "2fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "correlation_id": "c0a80101-0000-0000-0000-000000000001",
   "event_type": "InventoryReservationResult",
   "order_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
   "status": "FAILED",

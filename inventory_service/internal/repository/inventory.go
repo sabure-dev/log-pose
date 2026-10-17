@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -18,14 +20,30 @@ import (
 var (
 	ErrAlreadyProcessed     = errors.New("event already processed")
 	ErrOutOfStock           = errors.New("insufficient stock")
+	ErrProductNotFound      = errors.New("product not found in catalog")
 	ErrInvalidQuantity      = errors.New("quantity must be greater than zero")
 	ErrPriceMismatch        = errors.New("item price does not match catalog")
+	ErrInvalidEvent         = errors.New("invalid order event payload")
 	ErrCorruptedReservation = errors.New("corrupted reservation state")
 )
+
+var decimalPriceRegex = regexp.MustCompile(`^\d{1,8}(\.\d{1,2})?$`)
+
+func isValidPositiveDecimalPrice(raw string) bool {
+	if !decimalPriceRegex.MatchString(raw) {
+		return false
+	}
+	val, err := strconv.ParseFloat(raw, 64)
+	if err != nil || val <= 0 {
+		return false
+	}
+	return true
+}
 
 type Reserver interface {
 	Reserve(ctx context.Context, event domain.OrderCreatedEvent) error
 	Release(ctx context.Context, event domain.OrderCancelledEvent) error
+	Confirm(ctx context.Context, event domain.OrderCompletedEvent) error
 }
 
 type InventoryRepository struct {
@@ -36,7 +54,53 @@ func NewInventoryRepository(pool *pgxpool.Pool) *InventoryRepository {
 	return &InventoryRepository{pool: pool}
 }
 
+func (r *InventoryRepository) UpsertProduct(
+	ctx context.Context,
+	productID uuid.UUID,
+	name string,
+	price string,
+	available int,
+) error {
+	if productID == uuid.Nil || name == "" || !isValidPositiveDecimalPrice(price) || available < 0 {
+		return ErrInvalidEvent
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO products (id, name, price)
+		VALUES ($1, $2, $3::numeric)
+		ON CONFLICT (id) DO UPDATE
+		SET name = EXCLUDED.name,
+		    price = EXCLUDED.price
+	`, productID, name, price)
+	if err != nil {
+		return fmt.Errorf("failed to upsert product: %w", err)
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO inventory_stocks (product_id, available, reserved)
+		VALUES ($1, $2, 0)
+		ON CONFLICT (product_id) DO UPDATE
+		SET available = EXCLUDED.available,
+		    updated_at = NOW()
+	`, productID, available)
+	if err != nil {
+		return fmt.Errorf("failed to upsert stock: %w", err)
+	}
+
+	return tx.Commit(ctx)
+}
+
 func (r *InventoryRepository) Reserve(ctx context.Context, event domain.OrderCreatedEvent) error {
+	if event.OrderID == uuid.Nil {
+		return ErrInvalidEvent
+	}
+
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin tx: %w", err)
@@ -64,14 +128,23 @@ func (r *InventoryRepository) Reserve(ctx context.Context, event domain.OrderCre
 		return r.failReservation(ctx, tx, event, "empty items list", ErrInvalidQuantity)
 	}
 
+	seenProducts := make(map[uuid.UUID]struct{}, len(event.Items))
 	for _, item := range event.Items {
+		if item.ProductID == uuid.Nil {
+			return r.failReservation(ctx, tx, event, "invalid product_id", ErrInvalidEvent)
+		}
+		if _, exists := seenProducts[item.ProductID]; exists {
+			return r.failReservation(ctx, tx, event, "duplicate product_id in order items", ErrInvalidEvent)
+		}
+		seenProducts[item.ProductID] = struct{}{}
+
 		if item.Quantity <= 0 {
 			return r.failReservation(ctx, tx, event, "quantity must be greater than zero", ErrInvalidQuantity)
 		}
 		if item.Price == "" {
 			return r.failReservation(ctx, tx, event, "missing item price", ErrPriceMismatch)
 		}
-		if _, err := strconv.ParseFloat(item.Price, 64); err != nil {
+		if !isValidPositiveDecimalPrice(item.Price) {
 			return r.failReservation(ctx, tx, event, "invalid item price format", ErrPriceMismatch)
 		}
 
@@ -84,7 +157,7 @@ func (r *InventoryRepository) Reserve(ctx context.Context, event domain.OrderCre
 		).Scan(&priceMatches)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				return r.failReservation(ctx, tx, event, "product not found in catalog", ErrOutOfStock)
+				return r.failReservation(ctx, tx, event, "product not found in catalog", ErrProductNotFound)
 			}
 			return fmt.Errorf("failed to check price for %s: %w", item.ProductID, err)
 		}
@@ -99,8 +172,14 @@ func (r *InventoryRepository) Reserve(ctx context.Context, event domain.OrderCre
 		return bytes.Compare(a.ProductID[:], b.ProductID[:])
 	})
 
+	// Wrap stock updates in a savepoint so partial deductions are rolled back if a subsequent item is out of stock.
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin stock savepoint: %w", err)
+	}
+
 	for _, item := range sortedItems {
-		cmdTag, err := tx.Exec(ctx, `
+		cmdTag, err := sp.Exec(ctx, `
 			UPDATE inventory_stocks
 			SET available = available - $1,
 			    reserved = reserved + $1,
@@ -108,14 +187,22 @@ func (r *InventoryRepository) Reserve(ctx context.Context, event domain.OrderCre
 			WHERE product_id = $2 AND available >= $1
 		`, item.Quantity, item.ProductID)
 		if err != nil {
+			_ = sp.Rollback(ctx)
 			return fmt.Errorf("stock update error for %s: %w", item.ProductID, err)
 		}
 		if cmdTag.RowsAffected() == 0 {
+			if rbErr := sp.Rollback(ctx); rbErr != nil {
+				return fmt.Errorf("failed to rollback stock savepoint: %w", rbErr)
+			}
 			return r.failReservation(ctx, tx, event, "insufficient stock", ErrOutOfStock)
 		}
 	}
 
-	reservedEvent := domain.InventoryReservedEvent{
+	if err := sp.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit stock savepoint: %w", err)
+	}
+
+	reservedEvent := domain.InventoryReservationResultEvent{
 		EventID:       uuid.New(),
 		CorrelationID: event.CorrelationID,
 		EventType:     "InventoryReservationResult",
@@ -154,7 +241,7 @@ func (r *InventoryRepository) failReservation(
 		return fmt.Errorf("failed to mark reservation as failed: %w", err)
 	}
 
-	failedEvent := domain.InventoryReservedEvent{
+	failedEvent := domain.InventoryReservationResultEvent{
 		EventID:       uuid.New(),
 		CorrelationID: event.CorrelationID,
 		EventType:     "InventoryReservationResult",
@@ -183,6 +270,10 @@ func (r *InventoryRepository) failReservation(
 }
 
 func (r *InventoryRepository) Release(ctx context.Context, event domain.OrderCancelledEvent) error {
+	if event.OrderID == uuid.Nil {
+		return ErrInvalidEvent
+	}
+
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin tx: %w", err)
@@ -231,4 +322,68 @@ func (r *InventoryRepository) Release(ctx context.Context, event domain.OrderCan
 	}
 
 	return tx.Commit(ctx)
+}
+
+func (r *InventoryRepository) Confirm(ctx context.Context, event domain.OrderCompletedEvent) error {
+	if event.OrderID == uuid.Nil {
+		return ErrInvalidEvent
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var itemsJSON []byte
+	err = tx.QueryRow(ctx, `
+		UPDATE reservations
+		SET status = 'CONFIRMED', updated_at = NOW()
+		WHERE order_id = $1 AND status = 'RESERVED'
+		RETURNING items
+	`, event.OrderID).Scan(&itemsJSON)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("failed to confirm reservation: %w", err)
+	}
+
+	var reservedItems []domain.OrderItemPayload
+	if err := json.Unmarshal(itemsJSON, &reservedItems); err != nil {
+		return fmt.Errorf("failed to unmarshal reserved items: %w", err)
+	}
+
+	slices.SortFunc(reservedItems, func(a, b domain.OrderItemPayload) int {
+		return bytes.Compare(a.ProductID[:], b.ProductID[:])
+	})
+
+	for _, item := range reservedItems {
+		cmdTag, err := tx.Exec(ctx, `
+			UPDATE inventory_stocks
+			SET reserved = reserved - $1,
+			    updated_at = NOW()
+			WHERE product_id = $2 AND reserved >= $1
+		`, item.Quantity, item.ProductID)
+		if err != nil {
+			return fmt.Errorf("failed to deduct reserved stock for %s: %w", item.ProductID, err)
+		}
+		if cmdTag.RowsAffected() == 0 {
+			return fmt.Errorf("%w: product %s reserved count underflow on confirm", ErrCorruptedReservation, item.ProductID)
+		}
+	}
+
+	return tx.Commit(ctx)
+}
+
+func (r *InventoryRepository) CleanupProcessedOutboxEvents(ctx context.Context, olderThan time.Duration) (int64, error) {
+	cutoff := time.Now().UTC().Add(-olderThan)
+	cmdTag, err := r.pool.Exec(ctx, `
+		DELETE FROM outbox_events
+		WHERE processed = TRUE AND created_at < $1
+	`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("failed to cleanup processed outbox events: %w", err)
+	}
+	return cmdTag.RowsAffected(), nil
 }

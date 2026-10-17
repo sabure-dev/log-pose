@@ -1,17 +1,27 @@
 import json
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
 
 from app.enums import OrderStatus
 from app.models import Order
-from app.workers.inventory_consumer import handle_inventory_message
+from app.workers.inventory_consumer import (
+    RETRY_QUEUE_NAME,
+    handle_inventory_message,
+)
 
 
 class DummyMessage:
-    def __init__(self, body: bytes, routing_key: str):
+    def __init__(
+        self,
+        body: bytes,
+        routing_key: str,
+        headers: dict | None = None,
+    ):
         self.body = body
         self.routing_key = routing_key
+        self.headers = headers or {}
         self.acked = False
         self.rejected = False
         self.nacked = False
@@ -24,6 +34,11 @@ class DummyMessage:
 
     async def nack(self, requeue: bool = True):
         self.nacked = True
+
+
+class DummyChannel:
+    def __init__(self):
+        self.default_exchange = AsyncMock()
 
 
 @pytest.mark.asyncio
@@ -40,6 +55,7 @@ async def test_handle_inventory_reserved_updates_order_status(db_session):
 
     payload = {
         "event_id": str(uuid.uuid4()),
+        "correlation_id": "corr-123",
         "order_id": str(order_id),
         "status": "RESERVED",
     }
@@ -67,7 +83,7 @@ async def test_handle_inventory_reserved_updates_order_status(db_session):
 
 
 @pytest.mark.asyncio
-async def test_handle_inventory_failed_cancels_order(db_session):
+async def test_handle_inventory_failed_cancels_order_and_stores_reason(db_session):
     order_id = uuid.uuid4()
     order = Order(
         id=order_id,
@@ -80,6 +96,7 @@ async def test_handle_inventory_failed_cancels_order(db_session):
 
     payload = {
         "event_id": str(uuid.uuid4()),
+        "correlation_id": "corr-456",
         "order_id": str(order_id),
         "status": "FAILED",
         "reason": "insufficient stock",
@@ -104,7 +121,52 @@ async def test_handle_inventory_failed_cancels_order(db_session):
 
     await db_session.refresh(order)
     assert order.status == OrderStatus.CANCELLED.value
+    assert order.cancellation_reason == "insufficient stock"
     assert msg.acked is True
+
+
+@pytest.mark.asyncio
+async def test_handle_inventory_db_error_retries_and_dead_letters():
+    class FailingSessionFactory:
+        def __call__(self):
+            class FailingContext:
+                async def __aenter__(self):
+                    raise RuntimeError("db unavailable")
+
+                async def __aexit__(self, exc_type, exc_val, exc_tb):
+                    pass
+
+            return FailingContext()
+
+    payload = {
+        "event_id": str(uuid.uuid4()),
+        "order_id": str(uuid.uuid4()),
+        "status": "RESERVED",
+    }
+
+    # Attempt 1 -> published to retry queue and acked
+    msg1 = DummyMessage(
+        body=json.dumps(payload).encode("utf-8"),
+        routing_key="inventory.reserved",
+    )
+    ch1 = DummyChannel()
+    await handle_inventory_message(msg1, FailingSessionFactory(), channel=ch1)
+    assert msg1.acked is True
+    assert ch1.default_exchange.publish.call_count == 1
+    assert (
+        ch1.default_exchange.publish.call_args.kwargs["routing_key"] == RETRY_QUEUE_NAME
+    )
+
+    # Attempt 3 (x-retry-count=2) -> rejected without requeue (sent to DLQ)
+    msg3 = DummyMessage(
+        body=json.dumps(payload).encode("utf-8"),
+        routing_key="inventory.reserved",
+        headers={"x-retry-count": 2},
+    )
+    ch3 = DummyChannel()
+    await handle_inventory_message(msg3, FailingSessionFactory(), channel=ch3)
+    assert msg3.rejected is True
+    assert ch3.default_exchange.publish.call_count == 0
 
 
 @pytest.mark.asyncio

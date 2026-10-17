@@ -1,8 +1,8 @@
 import uuid
 from decimal import Decimal
 
+from app.domain import NewOrderItem
 from app.repositories.order import SqlAlchemyOrderRepository
-from app.schemas import OrderItemCreate
 
 
 async def test_repository_can_save_and_retrieve_order(db_session):
@@ -11,7 +11,7 @@ async def test_repository_can_save_and_retrieve_order(db_session):
     user_id = uuid.uuid4()
     product_id = uuid.uuid4()
     items_data = [
-        OrderItemCreate(product_id=product_id, quantity=2, price=Decimal("150.00"))
+        NewOrderItem(product_id=product_id, quantity=2, price=Decimal("150.00"))
     ]
 
     draft_order = await repo.add(
@@ -19,6 +19,7 @@ async def test_repository_can_save_and_retrieve_order(db_session):
         total_amount=Decimal("300.00"),
         items_data=items_data,
         shipping_address="Delivery St 10",
+        idempotency_key="repo-idem-1",
     )
 
     await db_session.commit()
@@ -30,10 +31,15 @@ async def test_repository_can_save_and_retrieve_order(db_session):
     assert saved_order.user_id == user_id
     assert saved_order.total_amount == Decimal("300.00")
     assert saved_order.shipping_address == "Delivery St 10"
+    assert saved_order.idempotency_key == "repo-idem-1"
 
     assert len(saved_order.items) == 1
     assert saved_order.items[0].product_id == product_id
     assert saved_order.items[0].quantity == 2
+
+    by_idem = await repo.get_by_user_and_idempotency_key(user_id, "repo-idem-1")
+    assert by_idem is not None
+    assert by_idem.id == draft_order.id
 
 
 async def test_repository_can_get_orders_filtered_by_user(db_session):
@@ -43,9 +49,7 @@ async def test_repository_can_get_orders_filtered_by_user(db_session):
 
     for _ in range(3):
         items_data = [
-            OrderItemCreate(
-                product_id=uuid.uuid4(), quantity=1, price=Decimal("100.00")
-            )
+            NewOrderItem(product_id=uuid.uuid4(), quantity=1, price=Decimal("100.00"))
         ]
         await repo.add(
             user_id=user_id, total_amount=Decimal("100.00"), items_data=items_data
@@ -53,7 +57,7 @@ async def test_repository_can_get_orders_filtered_by_user(db_session):
 
     for _ in range(2):
         items_data = [
-            OrderItemCreate(product_id=uuid.uuid4(), quantity=1, price=Decimal("50.00"))
+            NewOrderItem(product_id=uuid.uuid4(), quantity=1, price=Decimal("50.00"))
         ]
         await repo.add(
             user_id=other_user_id, total_amount=Decimal("50.00"), items_data=items_data

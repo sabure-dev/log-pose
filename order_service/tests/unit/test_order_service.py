@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Sequence
 
@@ -26,8 +26,10 @@ class FakeOrderRepository(AbstractOrderRepository):
         total_amount: Decimal,
         items_data: Sequence[NewOrderItem],
         shipping_address: str | None = None,
+        idempotency_key: str | None = None,
+        created_at: datetime | None = None,
     ) -> OrderEntity:
-        now = datetime.now(timezone.utc)
+        now = created_at or datetime.now(timezone.utc)
         order_items = [
             OrderItemEntity(
                 id=uuid.uuid4(),
@@ -43,6 +45,7 @@ class FakeOrderRepository(AbstractOrderRepository):
             status=OrderStatus.PENDING,
             total_amount=total_amount,
             shipping_address=shipping_address,
+            idempotency_key=idempotency_key,
             created_at=now,
             updated_at=now,
             items=order_items,
@@ -56,8 +59,19 @@ class FakeOrderRepository(AbstractOrderRepository):
     async def get_for_update(self, order_id: uuid.UUID) -> OrderEntity | None:
         return self.orders.get(order_id)
 
+    async def get_by_user_and_idempotency_key(
+        self, user_id: uuid.UUID, idempotency_key: str
+    ) -> OrderEntity | None:
+        for order in self.orders.values():
+            if order.user_id == user_id and order.idempotency_key == idempotency_key:
+                return order
+        return None
+
     async def update_status(
-        self, order_id: uuid.UUID, status: OrderStatus
+        self,
+        order_id: uuid.UUID,
+        status: OrderStatus,
+        cancellation_reason: str | None = None,
     ) -> OrderEntity | None:
         existing = self.orders.get(order_id)
         if not existing:
@@ -68,6 +82,12 @@ class FakeOrderRepository(AbstractOrderRepository):
             status=status,
             total_amount=existing.total_amount,
             shipping_address=existing.shipping_address,
+            cancellation_reason=(
+                cancellation_reason
+                if cancellation_reason is not None
+                else existing.cancellation_reason
+            ),
+            idempotency_key=existing.idempotency_key,
             created_at=existing.created_at,
             updated_at=datetime.now(timezone.utc),
             items=existing.items,
@@ -88,6 +108,16 @@ class FakeOrderRepository(AbstractOrderRepository):
     ) -> Sequence[OrderEntity]:
         user_orders = [o for o in self.orders.values() if o.user_id == user_id]
         return user_orders[skip : skip + limit]
+
+    async def get_stale_pending_orders(
+        self, older_than: datetime, limit: int = 50
+    ) -> Sequence[OrderEntity]:
+        stale = [
+            o
+            for o in self.orders.values()
+            if o.status == OrderStatus.PENDING and o.created_at <= older_than
+        ]
+        return stale[:limit]
 
 
 class FakeOutboxRepository(AbstractOutboxRepository):
@@ -141,7 +171,24 @@ async def test_create_order_calculates_total_and_commits():
     assert event["payload"]["total_amount"] == "400.00"
 
 
-async def test_cancel_pending_order_emits_cancelled_event():
+async def test_create_order_with_idempotency_key_deduplicates():
+    uow = FakeUnitOfWork()
+    service = OrderService(uow=uow)
+    user_id = uuid.uuid4()
+    items = [NewOrderItem(product_id=uuid.uuid4(), quantity=1, price=Decimal("99.50"))]
+
+    first = await service.create_new_order(
+        user_id=user_id, items=items, idempotency_key="idem-key-1"
+    )
+    second = await service.create_new_order(
+        user_id=user_id, items=items, idempotency_key="idem-key-1"
+    )
+
+    assert first.id == second.id
+    assert len(uow.outbox.events) == 1
+
+
+async def test_cancel_pending_order_emits_cancelled_event_and_sets_reason():
     uow = FakeUnitOfWork()
     service = OrderService(uow=uow)
     user_id = uuid.uuid4()
@@ -155,6 +202,7 @@ async def test_cancel_pending_order_emits_cancelled_event():
 
     cancelled = await service.cancel_order(draft_order.id, user_id=user_id)
     assert cancelled.status == OrderStatus.CANCELLED
+    assert cancelled.cancellation_reason == "cancelled by user"
 
     cancelled_events = [e for e in uow.outbox.events if e["topic"] == "order.cancelled"]
     assert len(cancelled_events) == 1
@@ -164,16 +212,19 @@ async def test_cancel_pending_order_emits_cancelled_event():
     ]
 
 
-async def test_system_cancel_from_pending_does_not_emit_cancelled_event():
+async def test_system_cancel_from_pending_records_reason_and_skips_event():
     uow = FakeUnitOfWork()
     service = OrderService(uow=uow)
     user_id = uuid.uuid4()
 
     draft_order = await uow.orders.add(user_id, Decimal("100.00"), [])
-    updated = await service.update_order_status(draft_order.id, OrderStatus.CANCELLED)
+    updated = await service.update_order_status(
+        draft_order.id, OrderStatus.CANCELLED, reason="insufficient stock"
+    )
 
     assert updated is not None
     assert updated.status == OrderStatus.CANCELLED
+    assert updated.cancellation_reason == "insufficient stock"
     cancelled_events = [e for e in uow.outbox.events if e["topic"] == "order.cancelled"]
     assert len(cancelled_events) == 0
 
@@ -192,6 +243,60 @@ async def test_update_reserved_order_to_cancelled_publishes_outbox_event():
 
     assert updated_order is not None
     assert updated_order.status == OrderStatus.CANCELLED
+    cancelled_events = [e for e in uow.outbox.events if e["topic"] == "order.cancelled"]
+    assert len(cancelled_events) == 1
+
+
+async def test_ship_and_complete_order_emits_order_completed_event():
+    uow = FakeUnitOfWork()
+    service = OrderService(uow=uow)
+    user_id = uuid.uuid4()
+    product_id = uuid.uuid4()
+
+    order = await uow.orders.add(
+        user_id,
+        Decimal("300.00"),
+        [NewOrderItem(product_id=product_id, quantity=3, price=Decimal("100.00"))],
+    )
+    await service.update_order_status(order.id, OrderStatus.RESERVED)
+
+    shipped = await service.ship_order(order.id, user_id=user_id)
+    assert shipped.status == OrderStatus.READY_FOR_SHIPPING
+
+    completed = await service.complete_order(order.id, user_id=user_id)
+    assert completed.status == OrderStatus.COMPLETED
+
+    completed_events = [e for e in uow.outbox.events if e["topic"] == "order.completed"]
+    assert len(completed_events) == 1
+    assert completed_events[0]["payload"]["event_type"] == "OrderCompleted"
+    assert completed_events[0]["payload"]["order_id"] == str(order.id)
+    assert completed_events[0]["payload"]["items"] == [
+        {"product_id": str(product_id), "quantity": 3}
+    ]
+
+
+async def test_expire_stale_pending_orders_cancels_and_emits_event():
+    uow = FakeUnitOfWork()
+    service = OrderService(uow=uow)
+    user_id = uuid.uuid4()
+    product_id = uuid.uuid4()
+
+    stale_time = datetime.now(timezone.utc) - timedelta(minutes=30)
+    stale_order = await uow.orders.add(
+        user_id,
+        Decimal("50.00"),
+        [NewOrderItem(product_id=product_id, quantity=1, price=Decimal("50.00"))],
+        created_at=stale_time,
+    )
+
+    expired_count = await service.expire_stale_pending_orders(timeout_seconds=900)
+    assert expired_count == 1
+
+    updated = await uow.orders.get(stale_order.id)
+    assert updated is not None
+    assert updated.status == OrderStatus.CANCELLED
+    assert updated.cancellation_reason == "reservation timeout"
+
     cancelled_events = [e for e in uow.outbox.events if e["topic"] == "order.cancelled"]
     assert len(cancelled_events) == 1
 

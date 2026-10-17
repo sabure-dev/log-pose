@@ -1,10 +1,18 @@
+x-order-env: &order-env
+  DB_HOST: postgres
+  DB_PORT: 5432
+  DB_USER: orders_user
+  DB_PASS: ${ORDERS_DB_PASSWORD}
+  DB_NAME: orders_db
+  RABBITMQ_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/"
+
 services:
   postgres:
     image: postgres:18-alpine
     container_name: logpose_postgres
     restart: unless-stopped
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -23,12 +31,12 @@ services:
       retries: 5
 
   rabbitmq:
-    image: rabbitmq:3-management-alpine
+    image: rabbitmq:4-management-alpine
     container_name: logpose_rabbitmq
     restart: unless-stopped
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS}
@@ -42,46 +50,58 @@ services:
 
   order_service:
     build: order_service/
-    container_name: orders_api
+    container_name: logpose_order_service
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
-    env_file:
-      - order_service/.env
+    environment:
+      <<: *order-env
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/orders/healthcheck', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     restart: on-failure
     networks:
       - logpose_net
 
   order_outbox_worker:
     build: order_service/
-    container_name: logpose_outbox_worker
-    command: ["uv", "run", "python", "-m", "app.workers.outbox_relay"]
+    container_name: logpose_order_outbox_worker
+    command: ["uv", "run", "--no-sync", "python", "-m", "app.workers.outbox_relay"]
     depends_on:
-      postgres:
+      order_service:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
-    env_file:
-      - order_service/.env
+    environment:
+      <<: *order-env
     restart: always
     networks:
       - logpose_net
 
-  order_inventory_worker:
+  order_inventory_consumer_worker:
     build: order_service/
-    container_name: logpose_order_inventory_worker
-    command: ["uv", "run", "python", "-m", "app.workers.inventory_consumer"]
+    container_name: logpose_order_inventory_consumer_worker
+    command: ["uv", "run", "--no-sync", "python", "-m", "app.workers.inventory_consumer"]
     depends_on:
-      postgres:
+      order_service:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
-    env_file:
-      - order_service/.env
+    environment:
+      <<: *order-env
     restart: always
     networks:
       - logpose_net

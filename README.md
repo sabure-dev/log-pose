@@ -5,7 +5,7 @@
 ![Go](https://img.shields.io/badge/Go-1.23-00ADD8?style=flat&logo=go&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.139-009688?style=flat&logo=fastapi&logoColor=white)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-4169E1?style=flat&logo=postgresql&logoColor=white)
-![RabbitMQ](https://img.shields.io/badge/RabbitMQ-3.x-FF6600?style=flat&logo=rabbitmq&logoColor=white)
+![RabbitMQ](https://img.shields.io/badge/RabbitMQ-4.x-FF6600?style=flat&logo=rabbitmq&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat&logo=docker&logoColor=white)
 
 Polyglot microservices system (Python + Go) for order management and warehouse stock reservations built on an asynchronous Choreographed Saga, Transactional Outbox, and Idempotent Inbox patterns.
@@ -13,25 +13,28 @@ Polyglot microservices system (Python + Go) for order management and warehouse s
 ## Services Architecture
 
 * **`order_service` (Python 3.13, FastAPI, SQLAlchemy 2.0 async, Alembic, `uv`):**
-  * REST API for order creation, retrieval, and cancellation with strict tenant isolation via `X-User-Id`.
+  * REST API for order creation (with `Idempotency-Key` deduplication), retrieval, shipping, completion, and cancellation.
+  * Designed to run behind a trusted API Gateway that authenticates requests and forwards the verified `X-User-Id` header for tenant isolation.
   * Unit of Work and Transactional Outbox: atomic order persistence and event recording in PostgreSQL.
-  * Background worker `outbox_relay`: polls unprocessed events with `FOR UPDATE SKIP LOCKED` and publishes to RabbitMQ.
-  * Background consumer `inventory_consumer`: handles inventory responses and updates order status via a finite state machine.
+  * Background worker `outbox_relay`: polls unprocessed events with `FOR UPDATE SKIP LOCKED`, publishes to RabbitMQ with exponential backoff and poison-event parking, and expires stale pending orders.
+  * Background consumer `inventory_consumer`: handles inventory reservation outcomes (`RESERVED` / `FAILED` with `cancellation_reason`) via a finite state machine with delayed retry queues and DLQ.
 
 * **`inventory_service` (Go 1.23, `pgx/v5`, `amqp091-go`, `errgroup`):**
-  * RabbitMQ consumer with manual acknowledgment (`manual ack/nack`) and QoS prefetch control.
-  * Idempotency via `reservations` table and Inbox: protects against duplicate processing on redelivery.
-  * Atomic stock reservation with deadlock prevention by pre-sorting `product_id` slices before executing updates.
-  * Transactional Outbox in Go: records reservation outcomes atomically and publishes via background outbox relay.
+  * RabbitMQ consumer with manual acknowledgment, delayed retry queue (`TTL + DLX`), and Dead Letter Queue.
+  * Idempotency via `reservations` table and Inbox: protects against duplicate processing on redelivery and handles early-cancellation tombstones.
+  * Atomic stock reservation with `SAVEPOINT` rollback protection and deadlock prevention by pre-sorting `product_id` slices before executing updates.
+  * Catalog price verification and stock deduction (`CONFIRMED`) upon `order.completed`.
+  * Transactional Outbox in Go: records reservation outcomes atomically and publishes via background outbox relay with per-event confirmation tracking and poison-event parking.
 
 ## Choreographed Saga Events (Exchange: `logpose_events`)
 
 | Event | Routing Key | Publisher | Consumer | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `OrderCreated` | `order.created` | `order_service` | `inventory_service` | New order created, requests item reservations |
-| `OrderCancelled` | `order.cancelled` | `order_service` | `inventory_service` | Order cancelled, releases held stock reservations |
+| `OrderCreated` | `order.created` | `order_service` | `inventory_service` | New order created, requests catalog price verification and item reservations |
+| `OrderCancelled` | `order.cancelled` | `order_service` | `inventory_service` | Order cancelled, releases held stock reservations (or records tombstone) |
+| `OrderCompleted` | `order.completed` | `order_service` | `inventory_service` | Order completed, permanently deducts reserved stock (`CONFIRMED`) |
 | `InventoryReservationResult` | `inventory.reserved` | `inventory_service` | `order_service` | Items successfully reserved, order transitions to `reserved` |
-| `InventoryReservationResult` | `inventory.failed` | `inventory_service` | `order_service` | Insufficient stock, order transitions to `cancelled` |
+| `InventoryReservationResult` | `inventory.failed` | `inventory_service` | `order_service` | Insufficient stock or price/catalog mismatch, order transitions to `cancelled` with `cancellation_reason` |
 
 JSON schema contracts are versioned under `docs/contracts/`.
 
@@ -45,7 +48,7 @@ Create `.env` in the project root:
 cp .env.example .env
 ```
 
-Create `.env` in `order_service/`:
+(Optional, for running `order_service` outside Docker):
 
 ```bash
 cp order_service/.env.example order_service/.env
@@ -64,20 +67,26 @@ docker compose down -v
 docker compose up --build
 ```
 
-Service endpoints:
+Service endpoints (bound to `127.0.0.1`):
 * **Order API:** `http://localhost:8000` (Swagger UI: `http://localhost:8000/docs`)
 * **RabbitMQ Management:** `http://localhost:15672` (default credentials from `.env`)
 * **PostgreSQL:** `localhost:5433`
 
+Default seeded catalog products in `inventory_db`:
+* `3fa85f64-5717-4562-b3fc-2c963f66afa6` — Mechanical Keyboard (`1500.50`, stock: `100`)
+* `123e4567-e89b-12d3-a456-426614174000` — Wireless Mouse (`300.00`, stock: `50`)
+
 ## API Usage
 
-All order endpoints require the `X-User-Id` header.
+All order endpoints require the `X-User-Id` header (injected by the upstream API Gateway in production).
 
-* `POST /orders/` — Create a new order.
+* `POST /orders/` — Create a new order (supports optional `Idempotency-Key` header).
 * `GET /orders/` — List orders for the authenticated user (`skip`, `limit`).
-* `GET /orders/{order_id}` — Get single order details (scoped to owner).
+* `GET /orders/{order_id}` — Get single order details (scoped to owner, includes `cancellation_reason` if cancelled).
+* `POST /orders/{order_id}/ship` — Transition a `reserved` order to `ready_for_shipping`.
+* `POST /orders/{order_id}/complete` — Complete a `ready_for_shipping` order and deduct reserved warehouse stock.
 * `POST /orders/{order_id}/cancel` — Cancel an order (triggers compensating stock release if reserved).
-* `GET /orders/healthcheck` — Service health check.
+* `GET /orders/healthcheck` — Service and database connectivity health check.
 
 ### Create Order Example
 
@@ -85,6 +94,7 @@ All order endpoints require the `X-User-Id` header.
 curl -X POST http://localhost:8000/orders/ \
   -H "Content-Type: application/json" \
   -H "X-User-Id: 123e4567-e89b-12d3-a456-426614174000" \
+  -H "Idempotency-Key: order-2026-0001" \
   -d '{
     "items": [
       {
@@ -97,10 +107,20 @@ curl -X POST http://localhost:8000/orders/ \
   }'
 ```
 
+### Ship & Complete Order Example
+
+```bash
+curl -X POST http://localhost:8000/orders/<order_id>/ship \
+  -H "X-User-Id: 123e4567-e89b-12d3-a456-426614174000"
+
+curl -X POST http://localhost:8000/orders/<order_id>/complete \
+  -H "X-User-Id: 123e4567-e89b-12d3-a456-426614174000"
+```
+
 ### Cancel Order Example
 
 ```bash
-curl -X POST http://localhost:8000/orders/3fa85f64-5717-4562-b3fc-2c963f66afa6/cancel \
+curl -X POST http://localhost:8000/orders/<order_id>/cancel \
   -H "X-User-Id: 123e4567-e89b-12d3-a456-426614174000"
 ```
 
@@ -117,5 +137,5 @@ uv run pytest
 
 ```bash
 cd inventory_service
-go test -v ./...
+TEST_DATABASE_URL="postgres://inventory_user:inventory_password@localhost:5433/inventory_db?sslmode=disable" go test -race -v ./...
 ```

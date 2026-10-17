@@ -16,6 +16,7 @@ import (
 	"inventory_service/internal/consumer"
 	"inventory_service/internal/repository"
 	"inventory_service/internal/workers"
+	"inventory_service/migrations"
 )
 
 func main() {
@@ -50,9 +51,10 @@ func run() error {
 	}
 	slog.Info("Connected to PostgreSQL")
 
-	if err := applyMigrations(ctx, pool); err != nil {
+	if err := migrations.Apply(ctx, pool, true); err != nil {
 		return fmt.Errorf("failed to apply migrations: %w", err)
 	}
+	slog.Info("Database migrations applied successfully")
 
 	conn, err := amqp.Dial(cfg.RabbitMQURL)
 	if err != nil {
@@ -92,19 +94,5 @@ func run() error {
 	}
 
 	slog.Info("Inventory Service exited cleanly")
-	return nil
-}
-
-func applyMigrations(ctx context.Context, pool *pgxpool.Pool) error {
-	migrationSQL, err := os.ReadFile("migrations/000001_init_inventory.sql")
-	if err != nil {
-		return fmt.Errorf("could not read migration file: %w", err)
-	}
-
-	if _, err := pool.Exec(ctx, string(migrationSQL)); err != nil {
-		return fmt.Errorf("migration execution error: %w", err)
-	}
-
-	slog.Info("Database migrations applied successfully")
 	return nil
 }
