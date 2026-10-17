@@ -5,13 +5,9 @@ FastAPI-based order management service implementing clean architecture, Transact
 ## Features
 
 * **Strict Dependency Inversion:** Service layer depends on abstractions (`AbstractUnitOfWork`, `AbstractOrderRepository`), decoupled from transport schemas and ORM entities.
-* **Idempotent Order Creation:** Supports optional `Idempotency-Key` header on `POST /orders/` with composite `(user_id, idempotency_key)` uniqueness.
-* **Transactional Outbox with Poison-Event Parking:** Order creation, cancellation, and completion events are persisted atomically and published by `outbox_relay` with per-event confirmation, retry backoff (`attempts`, `last_error`, `next_retry_at`), and automatic cleanup of old processed events.
-* **Complete Finite State Machine:** Governs transitions across `pending`, `reserved`, `ready_for_shipping`, `completed`, and `cancelled` (with persisted `cancellation_reason` and automatic expiration of stale `pending` orders).
-* **Tenant Isolation:** Enforced `X-User-Id` header on all order endpoints with user-scoped queries (designed to operate behind a trusted API Gateway).
-* **Background Workers:**
-  * `app.workers.outbox_relay`: Polls `outbox_events` using `FOR UPDATE SKIP LOCKED`, publishes to RabbitMQ with timeouts, and expires stale pending orders.
-  * `app.workers.inventory_consumer`: Consumes `inventory.reserved` and `inventory.failed` events with structured JSON logging, `correlation_id` propagation, delayed retry queue (`TTL + DLX`), and Dead Letter Queue.
+* **Idempotent Order Creation with Conflict Detection:** Supports optional `Idempotency-Key` header on `POST /orders/` with composite `(user_id, idempotency_key)` uniqueness, blank-key normalization, and `409 Conflict` when a key is reused with different order parameters.
+* **Transactional Outbox with Short-Lease Claiming:** Order creation, cancellation, and completion events are persisted atomically and published by `outbox_relay` using short leases (no DB locks held during network I/O), up to 20 retry attempts (5-minute ceiling), `requeue_parked_outbox_events` recovery, and bounded batch cleanup of old processed events.
+* **Complete Finite State Machine & Role Separation:** Governs transitions across `pending`, `reserved`, `ready_for_shipping`, `completed`, and `cancelled` (with 500-char truncated `cancellation_reason` and automatic expiration of stale `pending` orders). Fulfillment transitions (`/ship` and `/complete`) require operator authorization (`X-Internal-Token` or `X-User-Role: warehouse`).
 
 ## Environment Variables
 
@@ -24,6 +20,7 @@ FastAPI-based order management service implementing clean architecture, Transact
 | `DB_NAME` | Database name | `orders_db` |
 | `RABBITMQ_URL` | AMQP connection string | `amqp://guest:guest@localhost:5672/` |
 | `PENDING_ORDER_TIMEOUT_SECONDS` | Timeout before pending orders auto-expire | `900` |
+| `INTERNAL_API_TOKEN` | Secret token for operator endpoints (`/ship`, `/complete`) | `logpose-internal-secret` |
 
 ## Testing
 

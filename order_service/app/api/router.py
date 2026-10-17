@@ -5,10 +5,10 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import OrderServiceDep, UserIdDep
+from app.api.deps import OperatorAuthDep, OrderServiceDep, UserIdDep
 from app.database import get_db
 from app.domain import NewOrderItem
-from app.exceptions import InvalidTransition, OrderNotFound
+from app.exceptions import IdempotencyConflict, InvalidTransition, OrderNotFound
 from app.schemas import OrderCreate, OrderRead
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
@@ -48,12 +48,17 @@ async def create_order(
         )
         for item in order_in.items
     ]
-    order = await service.create_new_order(
-        current_user_id,
-        domain_items,
-        order_in.shipping_address,
-        idempotency_key=idempotency_key,
-    )
+    try:
+        order = await service.create_new_order(
+            current_user_id,
+            domain_items,
+            order_in.shipping_address,
+            idempotency_key=idempotency_key,
+        )
+    except IdempotencyConflict as err:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(err)
+        ) from err
     return OrderRead.model_validate(order)
 
 
@@ -107,10 +112,14 @@ async def cancel_order(
 async def ship_order(
     order_id: uuid.UUID,
     service: OrderServiceDep,
-    current_user_id: UserIdDep,
+    _operator: OperatorAuthDep,
+    x_user_id: Annotated[
+        uuid.UUID | None,
+        Header(alias="X-User-Id", description="Optional owner UUID filter"),
+    ] = None,
 ):
     try:
-        order = await service.ship_order(order_id, current_user_id)
+        order = await service.ship_order(order_id, user_id=x_user_id)
         return OrderRead.model_validate(order)
     except OrderNotFound:
         raise HTTPException(
@@ -126,10 +135,14 @@ async def ship_order(
 async def complete_order(
     order_id: uuid.UUID,
     service: OrderServiceDep,
-    current_user_id: UserIdDep,
+    _operator: OperatorAuthDep,
+    x_user_id: Annotated[
+        uuid.UUID | None,
+        Header(alias="X-User-Id", description="Optional owner UUID filter"),
+    ] = None,
 ):
     try:
-        order = await service.complete_order(order_id, current_user_id)
+        order = await service.complete_order(order_id, user_id=x_user_id)
         return OrderRead.model_validate(order)
     except OrderNotFound:
         raise HTTPException(

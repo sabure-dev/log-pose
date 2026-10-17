@@ -48,11 +48,15 @@ class SqlAlchemyOrderRepository(AbstractOrderRepository):
         shipping_address: str | None = None,
         idempotency_key: str | None = None,
     ) -> OrderEntity:
+        normalized_key = idempotency_key.strip() if idempotency_key else None
+        if not normalized_key:
+            normalized_key = None
+
         new_order = Order(
             user_id=user_id,
             total_amount=total_amount,
             shipping_address=shipping_address,
-            idempotency_key=idempotency_key,
+            idempotency_key=normalized_key,
             items=[
                 OrderItem(
                     product_id=item.product_id,
@@ -118,7 +122,7 @@ class SqlAlchemyOrderRepository(AbstractOrderRepository):
             return None
         order.status = status.value
         if cancellation_reason is not None:
-            order.cancellation_reason = cancellation_reason
+            order.cancellation_reason = cancellation_reason[:500]
         await self.session.flush()
         await self.session.refresh(order, attribute_names=["updated_at"])
         return _to_entity(order)
