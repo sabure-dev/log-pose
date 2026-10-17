@@ -16,28 +16,59 @@ import (
 
 const (
 	maxDeliveryAttempts = 3
+	defaultRetryDelayMs = 2000
+	retryConfirmTimeout = 5 * time.Second
 	mainQueueName       = "inventory_order_events_queue"
 	retryQueueName      = "inventory_order_events_retry_queue"
 	dlqQueueName        = "inventory_order_events_dlq"
 )
+
+type DeferredConfirmation interface {
+	WaitContext(ctx context.Context) (bool, error)
+}
 
 type AMQPChannel interface {
 	ExchangeDeclare(name, kind string, durable, autoDelete, internal, noWait bool, args amqp.Table) error
 	QueueDeclare(name string, durable, autoDelete, exclusive, noWait bool, args amqp.Table) (amqp.Queue, error)
 	QueueBind(name, key, exchange string, noWait bool, args amqp.Table) error
 	Qos(prefetchCount, prefetchSize int, global bool) error
+	Confirm(noWait bool) error
 	Consume(queue, consumer string, autoAck, exclusive, noLocal, noWait bool, args amqp.Table) (<-chan amqp.Delivery, error)
 	NotifyClose(c chan *amqp.Error) chan *amqp.Error
-	PublishWithContext(ctx context.Context, exchange, key string, mandatory, immediate bool, msg amqp.Publishing) error
+	PublishWithDeferredConfirmWithContext(ctx context.Context, exchange, key string, mandatory, immediate bool, msg amqp.Publishing) (*amqp.DeferredConfirmation, error)
 }
 
+type RetryPublishFunc func(ctx context.Context, exchange, key string, mandatory, immediate bool, msg amqp.Publishing) (DeferredConfirmation, error)
+
 type OrderConsumer struct {
-	ch       AMQPChannel
-	reserver repository.Reserver
+	ch           AMQPChannel
+	publishRetry RetryPublishFunc
+	reserver     repository.Reserver
+	retryDelayMs int
 }
 
 func NewOrderConsumer(ch AMQPChannel, reserver repository.Reserver) *OrderConsumer {
-	return &OrderConsumer{ch: ch, reserver: reserver}
+	c := &OrderConsumer{
+		ch:           ch,
+		reserver:     reserver,
+		retryDelayMs: defaultRetryDelayMs,
+	}
+	if ch != nil {
+		c.publishRetry = func(ctx context.Context, exchange, key string, mandatory, immediate bool, msg amqp.Publishing) (DeferredConfirmation, error) {
+			return ch.PublishWithDeferredConfirmWithContext(ctx, exchange, key, mandatory, immediate, msg)
+		}
+	}
+	return c
+}
+
+func (c *OrderConsumer) SetRetryDelayMs(delayMs int) {
+	if delayMs > 0 {
+		c.retryDelayMs = delayMs
+	}
+}
+
+func (c *OrderConsumer) SetRetryPublisher(fn RetryPublishFunc) {
+	c.publishRetry = fn
 }
 
 func (c *OrderConsumer) Run(ctx context.Context) error {
@@ -50,12 +81,14 @@ func (c *OrderConsumer) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to declare dlq: %w", err)
 	}
 
-	if err := c.ch.QueueBind(dlq.Name, dlqQueueName, "logpose_dlx", false, nil); err != nil {
-		return fmt.Errorf("failed to bind dlq: %w", err)
-	}
-	// Also keep backward-compatible binding for order.* routing keys routed to logpose_dlx.
-	if err := c.ch.QueueBind(dlq.Name, "order.#", "logpose_dlx", false, nil); err != nil {
-		return fmt.Errorf("failed to bind dlq to order.#: %w", err)
+	// Bind DLQ to:
+	// - dlqQueueName ("inventory_order_events_dlq")
+	// - mainQueueName ("inventory_order_events_queue"): messages returning from retryQueueName have routing key = mainQueueName
+	// - "order.#": messages rejected on their initial delivery before entering retryQueueName
+	for _, dlqKey := range []string{dlqQueueName, mainQueueName, "order.#"} {
+		if err := c.ch.QueueBind(dlq.Name, dlqKey, "logpose_dlx", false, nil); err != nil {
+			return fmt.Errorf("failed to bind dlq to %s: %w", dlqKey, err)
+		}
 	}
 
 	// Declare delay/retry queue that routes expired messages back to mainQueueName via default exchange.
@@ -112,6 +145,10 @@ func (c *OrderConsumer) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to bind queue to %s: %w", routingKey, err)
 		}
+	}
+
+	if err := c.ch.Confirm(false); err != nil {
+		return fmt.Errorf("failed to enable publisher confirms on consumer channel: %w", err)
 	}
 
 	if err := c.ch.Qos(20, 0, false); err != nil {
@@ -267,12 +304,7 @@ func (c *OrderConsumer) retryOrDeadLetter(ctx context.Context, d amqp.Delivery, 
 		return
 	}
 
-	backoffMs := 1000 * (1 << (attempts - 1))
-	slog.Warn("Transient error, scheduling delayed retry", "order_id", orderID, "correlation_id", correlationID, "attempt", attempts, "backoff_ms", backoffMs, "error", err)
-	if c.ch == nil {
-		_ = d.Nack(false, true)
-		return
-	}
+	slog.Warn("Transient error, scheduling delayed retry", "order_id", orderID, "correlation_id", correlationID, "attempt", attempts, "delay_ms", c.retryDelayMs, "error", err)
 
 	headers := amqp.Table{}
 	for k, v := range d.Headers {
@@ -281,9 +313,9 @@ func (c *OrderConsumer) retryOrDeadLetter(ctx context.Context, d amqp.Delivery, 
 	headers["x-retry-count"] = int32(attempts)
 	headers["x-original-routing-key"] = effectiveRoutingKey(d)
 
-	// Publish to retryQueueName via default exchange ("") with per-message Expiration TTL.
-	// Once expired, RabbitMQ dead-letters the message back to mainQueueName without broadcasting to other queues.
-	pubErr := c.ch.PublishWithContext(
+	// Publish to retryQueueName via default exchange ("") with uniform TTL to avoid FIFO head-of-line blocking,
+	// and wait for broker publisher confirm before acknowledging the original delivery.
+	dc, pubErr := c.publishRetry(
 		ctx,
 		"",
 		retryQueueName,
@@ -294,7 +326,7 @@ func (c *OrderConsumer) retryOrDeadLetter(ctx context.Context, d amqp.Delivery, 
 			ContentType:  d.ContentType,
 			DeliveryMode: amqp.Persistent,
 			MessageId:    d.MessageId,
-			Expiration:   strconv.Itoa(backoffMs),
+			Expiration:   strconv.Itoa(c.retryDelayMs),
 			Body:         d.Body,
 		},
 	)
@@ -302,6 +334,15 @@ func (c *OrderConsumer) retryOrDeadLetter(ctx context.Context, d amqp.Delivery, 
 		_ = d.Nack(false, true)
 		return
 	}
+
+	cctx, cancel := context.WithTimeout(ctx, retryConfirmTimeout)
+	ok, confirmErr := dc.WaitContext(cctx)
+	cancel()
+	if confirmErr != nil || !ok {
+		_ = d.Nack(false, true)
+		return
+	}
+
 	_ = d.Ack(false)
 }
 

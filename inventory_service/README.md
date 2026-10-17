@@ -11,9 +11,9 @@ High-performance Go service for warehouse stock reservations and catalog managem
   * `order.created` — Verifies catalog existence, strict decimal price matching, and reserves stock.
   * `order.cancelled` — Releases held reservations back into available stock.
   * `order.completed` — Deducts reserved stock permanently (`CONFIRMED`).
-* **Delayed Retries & DLQ:** Uses `inventory_order_events_retry_queue` (`TTL + DLX` via default exchange) for exponential backoff without broadcasting duplicates to other consumers, and routes exhausted messages to `inventory_order_events_dlq`.
-* **Transactional Outbox with Poison-Event Parking:** Reservation results are persisted within the same database transaction and published via background relay with per-event confirmation commits, retry backoff (`attempts`, `last_error`, `next_retry_at`), and automatic parking after max attempts.
-* **Embedded Versioned Migrations:** SQL migrations and catalog seeds are embedded via `embed.FS` and applied under a PostgreSQL transaction advisory lock (`pg_advisory_xact_lock`).
+* **Confirmed Delayed Retries & DLQ:** Uses `inventory_order_events_retry_queue` (`TTL + DLX` via default exchange with publisher confirms) and routes exhausted messages to `inventory_order_events_dlq` (bound to `inventory_order_events_dlq`, `inventory_order_events_queue`, and `order.#`).
+* **Lock-Free Network I/O in Outbox Relay:** Claims event batches via short lease updates (`FOR UPDATE SKIP LOCKED` committed immediately) before publishing to RabbitMQ, with up to 20 attempts (5-minute backoff ceiling), poison-event parking, and `RequeueParkedEvents` recovery.
+* **Embedded Versioned Migrations & Opt-In Seeding:** SQL migrations are embedded via `embed.FS` and applied under a PostgreSQL transaction advisory lock (`pg_advisory_xact_lock`). Demo catalog seeding runs only when `SEED_CATALOG=true`.
 
 ## Environment Variables
 
@@ -21,10 +21,14 @@ High-performance Go service for warehouse stock reservations and catalog managem
 | :--- | :--- |
 | `DATABASE_URL` | PostgreSQL connection string (`postgres://user:pass@host:5432/inventory_db?sslmode=disable`) |
 | `RABBITMQ_URL` | RabbitMQ connection string (`amqp://user:pass@host:5672/`) |
-| `TEST_DATABASE_URL` | Dedicated PostgreSQL connection string used exclusively by integration tests |
+| `SEED_CATALOG` | Optional (`true`/`false`, default `false`). Seeds demo catalog products on startup |
+| `TEST_DATABASE_URL` | Dedicated PostgreSQL URL for integration tests (database name **must** end with `_test`) |
+| `TEST_RABBITMQ_URL` | Optional RabbitMQ URL for running live AMQP topology and DLQ integration tests |
 
 ## Testing
 
 ```bash
-TEST_DATABASE_URL="postgres://inventory_user:inventory_password@localhost:5433/inventory_db?sslmode=disable" go test -race -v ./...
+TEST_DATABASE_URL="postgres://inventory_user:inventory_password@localhost:5433/inventory_test?sslmode=disable" \
+TEST_RABBITMQ_URL="amqp://logpose_admin:logpose_password@localhost:5672/" \
+go test -race -p 1 -v ./...
 ```

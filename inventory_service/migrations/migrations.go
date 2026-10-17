@@ -17,7 +17,7 @@ var FS embed.FS
 const migrationAdvisoryLockID int64 = 84920174
 
 // Apply runs embedded SQL migrations in lexical order using an advisory lock and schema_migrations table.
-func Apply(ctx context.Context, pool *pgxpool.Pool, includeSeeds bool) error {
+func Apply(ctx context.Context, pool *pgxpool.Pool) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin migration tx: %w", err)
@@ -48,9 +48,6 @@ func Apply(ctx context.Context, pool *pgxpool.Pool, includeSeeds bool) error {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
 			continue
 		}
-		if !includeSeeds && strings.Contains(entry.Name(), "seed") {
-			continue
-		}
 		filenames = append(filenames, entry.Name())
 	}
 	slices.Sort(filenames)
@@ -77,6 +74,39 @@ func Apply(ctx context.Context, pool *pgxpool.Pool, includeSeeds bool) error {
 		if _, err := tx.Exec(ctx, "INSERT INTO schema_migrations (version) VALUES ($1)", name); err != nil {
 			return fmt.Errorf("record migration %s: %w", name, err)
 		}
+	}
+
+	return tx.Commit(ctx)
+}
+
+// SeedCatalog idempotently inserts demo catalog items when SEED_CATALOG is enabled.
+func SeedCatalog(ctx context.Context, pool *pgxpool.Pool) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin seed tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO products (id, name, price)
+		VALUES
+			('3fa85f64-5717-4562-b3fc-2c963f66afa6', 'Mechanical Keyboard', 1500.50),
+			('123e4567-e89b-12d3-a456-426614174000', 'Wireless Mouse', 300.00)
+		ON CONFLICT (id) DO NOTHING
+	`)
+	if err != nil {
+		return fmt.Errorf("seed products: %w", err)
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO inventory_stocks (product_id, available, reserved)
+		VALUES
+			('3fa85f64-5717-4562-b3fc-2c963f66afa6', 100, 0),
+			('123e4567-e89b-12d3-a456-426614174000', 50, 0)
+		ON CONFLICT (product_id) DO NOTHING
+	`)
+	if err != nil {
+		return fmt.Errorf("seed inventory_stocks: %w", err)
 	}
 
 	return tx.Commit(ctx)

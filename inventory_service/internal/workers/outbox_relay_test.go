@@ -3,7 +3,9 @@ package workers_test
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -31,13 +33,21 @@ func setupRelayTestDB(t *testing.T) *pgxpool.Pool {
 		t.Skip("TEST_DATABASE_URL not set, skipping postgres integration test")
 	}
 
+	parsed, err := url.Parse(dbURL)
+	if err != nil {
+		t.Fatalf("invalid TEST_DATABASE_URL: %v", err)
+	}
+	dbName := strings.TrimPrefix(parsed.Path, "/")
+	if !strings.HasSuffix(dbName, "_test") {
+		t.Fatalf("refusing to run destructive integration tests on non-test database %q (database name must end with _test)", dbName)
+	}
+
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
 		t.Fatalf("failed to connect to db: %v", err)
 	}
 
-	// Acquire a session-level advisory lock on a dedicated connection so parallel package runs don't conflict or deadlock.
 	lockConn, err := pool.Acquire(ctx)
 	if err != nil {
 		pool.Close()
@@ -49,14 +59,13 @@ func setupRelayTestDB(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("failed to acquire db advisory lock: %v", err)
 	}
 
-	if err := migrations.Apply(ctx, pool, false); err != nil {
+	if err := migrations.Apply(ctx, pool); err != nil {
 		_, _ = lockConn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", testDBAdvisoryLockID)
 		lockConn.Release()
 		pool.Close()
 		t.Fatalf("failed to apply migrations: %v", err)
 	}
 
-	// Relay tests only mutate outbox_events; clean up without locking unrelated tables.
 	if _, err := pool.Exec(ctx, "DELETE FROM outbox_events;"); err != nil {
 		_, _ = lockConn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", testDBAdvisoryLockID)
 		lockConn.Release()
@@ -97,7 +106,6 @@ func TestOutboxRelay_PartialFailureDoesNotRollbackConfirmedEvents(t *testing.T) 
 	publishFn := func(ctx context.Context, exchange, key string, mandatory, immediate bool, msg amqp.Publishing) (workers.DeferredConfirmation, error) {
 		publishedIDs = append(publishedIDs, msg.MessageId)
 		if msg.MessageId == id2.String() {
-			// Simulate broker Nack (!ok && err == nil)
 			return stubConfirm{ok: false, err: nil}, nil
 		}
 		return stubConfirm{ok: true, err: nil}, nil
@@ -109,7 +117,6 @@ func TestOutboxRelay_PartialFailureDoesNotRollbackConfirmedEvents(t *testing.T) 
 		t.Fatalf("expected non-nil batchErr when one event was nacked")
 	}
 
-	// Verify event 1 and event 3 ARE marked processed=true, while event 2 has processed=false, attempts=1, and last_error set!
 	var p1, p2, p3 bool
 	var attempts2 int
 	var lastErr2 *string
@@ -125,7 +132,7 @@ func TestOutboxRelay_PartialFailureDoesNotRollbackConfirmedEvents(t *testing.T) 
 	}
 }
 
-func TestOutboxRelay_ParksEventAfterMaxAttempts(t *testing.T) {
+func TestOutboxRelay_ParksEventAfterMaxAttemptsAndRequeues(t *testing.T) {
 	pool := setupRelayTestDB(t)
 	ctx := context.Background()
 
@@ -163,5 +170,17 @@ func TestOutboxRelay_ParksEventAfterMaxAttempts(t *testing.T) {
 	}
 	if called {
 		t.Fatalf("expected parked event not to be republished")
+	}
+
+	// RequeueParkedEvents should unpark the event and allow it to be processed
+	requeued, err := relay2.RequeueParkedEvents(ctx)
+	if err != nil || requeued != 1 {
+		t.Fatalf("expected 1 requeued event, got %d (err=%v)", requeued, err)
+	}
+	if err := relay2.ProcessBatch(ctx); err != nil {
+		t.Fatalf("expected requeued event to succeed on ProcessBatch, got %v", err)
+	}
+	if !called {
+		t.Fatalf("expected requeued event to be published")
 	}
 }
