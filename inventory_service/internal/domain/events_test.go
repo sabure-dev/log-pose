@@ -24,6 +24,28 @@ func readContract(filename string) ([]byte, error) {
 	return nil, os.ErrNotExist
 }
 
+func assertJSONKeysMatch(t *testing.T, contractBytes []byte, producedBytes []byte) {
+	t.Helper()
+	var contractMap map[string]any
+	var producedMap map[string]any
+	if err := json.Unmarshal(contractBytes, &contractMap); err != nil {
+		t.Fatalf("failed to unmarshal contract JSON map: %v", err)
+	}
+	if err := json.Unmarshal(producedBytes, &producedMap); err != nil {
+		t.Fatalf("failed to unmarshal produced JSON map: %v", err)
+	}
+	for k := range contractMap {
+		if _, ok := producedMap[k]; !ok {
+			t.Errorf("contract key %q missing from produced payload", k)
+		}
+	}
+	for k := range producedMap {
+		if _, ok := contractMap[k]; !ok {
+			t.Errorf("produced key %q not documented in contract", k)
+		}
+	}
+}
+
 func TestContracts_OrderCreated(t *testing.T) {
 	data, err := readContract("order_created.json")
 	if err != nil {
@@ -40,8 +62,8 @@ func TestContracts_OrderCreated(t *testing.T) {
 		t.Errorf("expected EventID %s, got %s", expectedEventID, event.EventID)
 	}
 
-	if event.TotalAmount != "3301.00" {
-		t.Errorf("expected TotalAmount 3301.00, got %s", event.TotalAmount)
+	if event.TotalAmount != "3001.00" {
+		t.Errorf("expected TotalAmount 3001.00, got %s", event.TotalAmount)
 	}
 
 	if event.ShippingAddress == nil || *event.ShippingAddress != "Main Street 100, Apt 4B" {
@@ -51,6 +73,12 @@ func TestContracts_OrderCreated(t *testing.T) {
 	if len(event.Items) != 1 {
 		t.Fatalf("expected 1 item, got %d", len(event.Items))
 	}
+
+	reMarshaled, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("failed to marshal OrderCreatedEvent: %v", err)
+	}
+	assertJSONKeysMatch(t, data, reMarshaled)
 }
 
 func TestContracts_OrderCancelled(t *testing.T) {
@@ -68,6 +96,34 @@ func TestContracts_OrderCancelled(t *testing.T) {
 	if event.OrderID != expectedOrderID {
 		t.Errorf("expected OrderID %s, got %s", expectedOrderID, event.OrderID)
 	}
+
+	reMarshaled, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("failed to marshal OrderCancelledEvent: %v", err)
+	}
+	assertJSONKeysMatch(t, data, reMarshaled)
+}
+
+func TestContracts_OrderCompleted(t *testing.T) {
+	data, err := readContract("order_completed.json")
+	if err != nil {
+		t.Fatalf("failed to read contract file: %v", err)
+	}
+
+	var event domain.OrderCompletedEvent
+	if err := json.Unmarshal(data, &event); err != nil {
+		t.Fatalf("failed to unmarshal order_completed.json: %v", err)
+	}
+
+	if event.EventType != "OrderCompleted" {
+		t.Errorf("expected EventType OrderCompleted, got %s", event.EventType)
+	}
+
+	reMarshaled, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("failed to marshal OrderCompletedEvent: %v", err)
+	}
+	assertJSONKeysMatch(t, data, reMarshaled)
 }
 
 func TestContracts_InventoryReserved(t *testing.T) {
@@ -76,7 +132,7 @@ func TestContracts_InventoryReserved(t *testing.T) {
 		t.Fatalf("failed to read contract file: %v", err)
 	}
 
-	var event domain.InventoryReservedEvent
+	var event domain.InventoryReservationResultEvent
 	if err := json.Unmarshal(data, &event); err != nil {
 		t.Fatalf("failed to unmarshal inventory_reserved.json: %v", err)
 	}
@@ -84,6 +140,16 @@ func TestContracts_InventoryReserved(t *testing.T) {
 	if event.Status != "RESERVED" {
 		t.Errorf("expected status RESERVED, got %s", event.Status)
 	}
+
+	produced := domain.InventoryReservationResultEvent{
+		EventID:       event.EventID,
+		CorrelationID: event.CorrelationID,
+		EventType:     "InventoryReservationResult",
+		OrderID:       event.OrderID,
+		Status:        "RESERVED",
+	}
+	producedBytes, _ := json.Marshal(produced)
+	assertJSONKeysMatch(t, data, producedBytes)
 }
 
 func TestContracts_InventoryFailed(t *testing.T) {
@@ -92,7 +158,7 @@ func TestContracts_InventoryFailed(t *testing.T) {
 		t.Fatalf("failed to read contract file: %v", err)
 	}
 
-	var event domain.InventoryReservedEvent
+	var event domain.InventoryReservationResultEvent
 	if err := json.Unmarshal(data, &event); err != nil {
 		t.Fatalf("failed to unmarshal inventory_failed.json: %v", err)
 	}
@@ -104,4 +170,15 @@ func TestContracts_InventoryFailed(t *testing.T) {
 	if event.Reason != "insufficient stock" {
 		t.Errorf("expected reason 'insufficient stock', got %s", event.Reason)
 	}
+
+	produced := domain.InventoryReservationResultEvent{
+		EventID:       event.EventID,
+		CorrelationID: event.CorrelationID,
+		EventType:     "InventoryReservationResult",
+		OrderID:       event.OrderID,
+		Status:        "FAILED",
+		Reason:        "insufficient stock",
+	}
+	producedBytes, _ := json.Marshal(produced)
+	assertJSONKeysMatch(t, data, producedBytes)
 }

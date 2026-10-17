@@ -30,7 +30,17 @@ type OrderCancelledEvent struct {
 	OccurredAt    string             `json:"occurred_at"`
 }
 
-type InventoryReservedEvent struct {
+type OrderCompletedEvent struct {
+	EventID       uuid.UUID          `json:"event_id"`
+	CorrelationID string             `json:"correlation_id,omitempty"`
+	EventType     string             `json:"event_type"`
+	OrderID       uuid.UUID          `json:"order_id"`
+	UserID        uuid.UUID          `json:"user_id"`
+	Items         []OrderItemPayload `json:"items"`
+	OccurredAt    string             `json:"occurred_at"`
+}
+
+type InventoryReservationResultEvent struct {
 	EventID       uuid.UUID `json:"event_id"`
 	CorrelationID string    `json:"correlation_id,omitempty"`
 	EventType     string    `json:"event_type"`
@@ -38,3 +48,6 @@ type InventoryReservedEvent struct {
 	Status        string    `json:"status"`
 	Reason        string    `json:"reason,omitempty"`
 }
+
+// InventoryReservedEvent is kept as a type alias for backward compatibility.
+type InventoryReservedEvent = InventoryReservationResultEvent
