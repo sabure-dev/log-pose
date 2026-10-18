@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import computed_field
+from pydantic import AliasChoices, Field, computed_field
 from pydantic_core import MultiHostUrl
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     db_pass: str = "orders_password"
     db_echo: bool = False
 
+    database_url_override: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("DATABASE_URL", "database_url"),
+    )
+
     rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
     pending_order_timeout_seconds: int = 900
     internal_api_token: str = "logpose-internal-secret"
@@ -22,6 +27,8 @@ class Settings(BaseSettings):
     @computed_field
     @property
     def database_url(self) -> str:
+        if self.database_url_override:
+            return self.database_url_override
         url = MultiHostUrl.build(
             scheme="postgresql+asyncpg",
             username=self.db_user,

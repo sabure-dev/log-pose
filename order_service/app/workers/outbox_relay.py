@@ -99,6 +99,7 @@ async def process_outbox_batch(
             event.last_error = None
             event.next_retry_at = None
             published_count += 1
+            await session.commit()
             logger.info(f"Event sent: {event.topic} (ID: {event.id})")
         except Exception as exc:
             next_attempt = (event.attempts or 0) + 1
@@ -108,6 +109,7 @@ async def process_outbox_batch(
             event.next_retry_at = datetime.now(timezone.utc) + timedelta(
                 seconds=backoff_seconds
             )
+            await session.commit()
             if next_attempt >= MAX_OUTBOX_ATTEMPTS:
                 logger.error(
                     f"Outbox event {event.id} ({event.topic}) parked after "
@@ -121,7 +123,6 @@ async def process_outbox_batch(
         finally:
             correlation_id_ctx.reset(token)
 
-    await session.commit()
     return published_count
 
 
@@ -194,6 +195,11 @@ async def run_outbox_relay():
                         if expired > 0:
                             logger.info(f"Expired {expired} stale pending orders")
                         await cleanup_processed_outbox_events(session)
+                        requeued = await requeue_parked_outbox_events(session)
+                        if requeued > 0:
+                            logger.warning(
+                                f"Requeued {requeued} parked outbox events for retry"
+                            )
 
                     if processed_count == 0:
                         try:

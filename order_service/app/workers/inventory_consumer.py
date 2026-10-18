@@ -3,10 +3,10 @@ import functools
 import json
 import logging
 import signal
-import uuid
 
 import aio_pika
 from aio_pika.abc import AbstractChannel, AbstractIncomingMessage
+from pydantic import ValidationError
 
 from app.config import settings
 from app.database import async_session_maker, engine
@@ -14,6 +14,7 @@ from app.enums import OrderStatus
 from app.exceptions import DomainError
 from app.logging import correlation_id_ctx, setup_logging
 from app.repositories.uow import SqlAlchemyUnitOfWork
+from app.schemas import InventoryResultPayload
 from app.services.order import OrderService
 
 logger = logging.getLogger(__name__)
@@ -56,10 +57,11 @@ async def _retry_or_dead_letter(
     )
 
     if channel is None:
-        await message.nack(requeue=True)
+        await message.reject(requeue=False)
         return
 
     headers = dict(getattr(message, "headers", None) or {})
+    headers = {k: v for k, v in headers.items() if "death" not in str(k).lower()}
     headers["x-retry-count"] = attempts
     headers["x-original-routing-key"] = headers.get(
         "x-original-routing-key", getattr(message, "routing_key", "")
@@ -79,8 +81,10 @@ async def _retry_or_dead_letter(
             timeout=5.0,
         )
     except Exception as pub_err:
-        logger.error(f"Failed to publish message to retry queue: {pub_err}")
-        await message.nack(requeue=True)
+        logger.error(
+            f"Failed to publish message to retry queue, routing to DLQ: {pub_err}"
+        )
+        await message.reject(requeue=False)
         return
 
     await message.ack()
@@ -92,38 +96,25 @@ async def handle_inventory_message(
     channel: AbstractChannel | None = None,
 ) -> None:
     try:
-        payload = json.loads(message.body.decode("utf-8"))
-    except Exception as exc:
-        logger.error(f"Malformed json payload: {exc}")
+        raw_payload = json.loads(message.body.decode("utf-8"))
+        if not isinstance(raw_payload, dict):
+            logger.error("Payload is not a JSON object")
+            await message.reject(requeue=False)
+            return
+        parsed = InventoryResultPayload.model_validate(raw_payload)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
+        logger.warning(f"Invalid inventory event payload: {exc}")
         await message.reject(requeue=False)
         return
 
-    if not isinstance(payload, dict):
-        logger.error("Payload is not a JSON object")
-        await message.reject(requeue=False)
-        return
-
-    correlation_id = payload.get("correlation_id") or ""
-    token = correlation_id_ctx.set(str(correlation_id))
+    correlation_id = parsed.correlation_id or ""
+    token = correlation_id_ctx.set(correlation_id)
 
     try:
-        order_id_raw = payload.get("order_id")
-        status_raw = payload.get("status")
-        reason = payload.get("reason")
-        if not order_id_raw or status_raw not in ("RESERVED", "FAILED"):
-            logger.warning(f"Unprocessable payload or status: {payload}")
-            await message.reject(requeue=False)
-            return
-
-        try:
-            order_id = uuid.UUID(str(order_id_raw))
-        except ValueError:
-            logger.error(f"Invalid UUID: {order_id_raw}")
-            await message.reject(requeue=False)
-            return
-
         target_status = (
-            OrderStatus.RESERVED if status_raw == "RESERVED" else OrderStatus.CANCELLED
+            OrderStatus.RESERVED
+            if parsed.status == "RESERVED"
+            else OrderStatus.CANCELLED
         )
 
         try:
@@ -132,13 +123,13 @@ async def handle_inventory_message(
                 service = OrderService(uow=uow)
                 try:
                     await service.update_order_status(
-                        order_id, target_status, reason=reason
+                        parsed.order_id, target_status, reason=parsed.reason
                     )
                 except DomainError as domain_err:
                     logger.warning(f"Domain transition rejected: {domain_err}")
         except Exception as db_err:
             logger.error(f"Database error in inventory consumer: {db_err}")
-            await _retry_or_dead_letter(message, channel, str(order_id), db_err)
+            await _retry_or_dead_letter(message, channel, str(parsed.order_id), db_err)
             return
 
         await message.ack()

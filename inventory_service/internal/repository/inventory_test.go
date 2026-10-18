@@ -380,6 +380,17 @@ func TestReserve_ThenConfirm_DeductsReservedStock(t *testing.T) {
 	if available != 10 || reserved != 0 {
 		t.Fatalf("expected available=10, reserved=0 after Confirm, got %d/%d", available, reserved)
 	}
+
+	// Confirming an unreserved / non-existent order must fail with ErrCorruptedReservation
+	unreservedCompleteEv := domain.OrderCompletedEvent{
+		EventID:   uuid.New(),
+		EventType: "OrderCompleted",
+		OrderID:   uuid.New(),
+		UserID:    createEv.UserID,
+	}
+	if err := repo.Confirm(ctx, unreservedCompleteEv); !errors.Is(err, repository.ErrCorruptedReservation) {
+		t.Fatalf("expected ErrCorruptedReservation when confirming unreserved order, got %v", err)
+	}
 }
 
 func TestReserve_PriceMismatchAndInvalidPrices(t *testing.T) {

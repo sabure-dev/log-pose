@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
@@ -10,7 +10,7 @@ from app.enums import OrderStatus
 
 class OrderItemCreate(BaseModel):
     product_id: uuid.UUID
-    quantity: Annotated[int, Field(ge=1, le=10000)] = 1
+    quantity: Annotated[int, Field(ge=1, le=10000)]
     price: Annotated[
         Decimal,
         Field(
@@ -23,7 +23,7 @@ class OrderItemCreate(BaseModel):
 
 
 class OrderCreate(BaseModel):
-    items: Annotated[list[OrderItemCreate], Field(min_length=1)]
+    items: Annotated[list[OrderItemCreate], Field(min_length=1, max_length=100)]
     shipping_address: Annotated[str | None, Field(max_length=500)] = None
 
     @field_validator("items")
@@ -59,3 +59,12 @@ class OrderRead(BaseModel):
     items: list[OrderItemRead]
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class InventoryResultPayload(BaseModel):
+    event_id: uuid.UUID | None = None
+    correlation_id: str | None = None
+    event_type: str | None = None
+    order_id: uuid.UUID
+    status: Literal["RESERVED", "FAILED"]
+    reason: str | None = None

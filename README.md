@@ -138,8 +138,10 @@ uv run pytest
 Integration tests require a database name ending with `_test` (e.g. `inventory_test`, created automatically by `infra/init-db.sh`) so running tests never wipes your development `inventory_db` catalog:
 
 ```bash
-cd inventory_service
+# setup test rabbitmq environment
+docker run -d --rm -p 5673:5672 rabbitmq:4-alpine
+
+TEST_RABBITMQ_URL="amqp://guest:guest@localhost:5673/" \
 TEST_DATABASE_URL="postgres://inventory_user:inventory_password@localhost:5433/inventory_test?sslmode=disable" \
-TEST_RABBITMQ_URL="amqp://logpose_admin:logpose_password@localhost:5672/" \
-go test -race -p 1 -v ./...
+go test -race -v -p 1 ./...
 ```

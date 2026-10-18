@@ -5,6 +5,7 @@ from decimal import Decimal
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -46,6 +47,12 @@ class OutboxEvent(Base):
             postgresql_where=text("processed = false"),
             sqlite_where=text("processed = 0"),
         ),
+        Index(
+            "ix_outbox_events_processed_created_at",
+            "created_at",
+            postgresql_where=text("processed = true"),
+            sqlite_where=text("processed = 1"),
+        ),
     )
 
 
@@ -85,6 +92,18 @@ class Order(Base):
         UniqueConstraint(
             "user_id", "idempotency_key", name="uq_orders_user_idempotency_key"
         ),
+        CheckConstraint(
+            "status IN ('pending', 'reserved', 'ready_for_shipping', "
+            "'completed', 'cancelled')",
+            name="ck_orders_status",
+        ),
+        CheckConstraint("total_amount >= 0", name="ck_orders_total_amount"),
+        Index(
+            "ix_orders_pending_created_at",
+            "created_at",
+            postgresql_where=text("status = 'pending'"),
+            sqlite_where=text("status = 'pending'"),
+        ),
     )
 
 
@@ -108,3 +127,8 @@ class OrderItem(Base):
     price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
 
     order: Mapped["Order"] = relationship("Order", back_populates="items")
+
+    __table_args__ = (
+        CheckConstraint("quantity > 0", name="ck_order_items_quantity"),
+        CheckConstraint("price > 0", name="ck_order_items_price"),
+    )

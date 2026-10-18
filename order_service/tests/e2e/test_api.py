@@ -253,11 +253,17 @@ async def test_ship_and_complete_order_endpoints_require_operator_auth(
     )
     order_id = uuid.UUID(create_resp.json()["id"])
 
-    # Regular customer without X-Internal-Token or operator role gets 403 Forbidden
+    # Regular customer without X-Internal-Token gets 403 Forbidden
     forbidden_ship = await async_client.post(
         f"/orders/{order_id}/ship", headers={"X-User-Id": user_id}
     )
     assert forbidden_ship.status_code == 403
+
+    # Spoofed X-User-Role without valid X-Internal-Token gets 403 Forbidden
+    spoofed_role = await async_client.post(
+        f"/orders/{order_id}/ship", headers={"X-User-Role": "warehouse"}
+    )
+    assert spoofed_role.status_code == 403
 
     op_headers = {
         "X-User-Id": user_id,
@@ -277,9 +283,18 @@ async def test_ship_and_complete_order_endpoints_require_operator_auth(
     assert ship_resp.status_code == 200
     assert ship_resp.json()["status"] == OrderStatus.READY_FOR_SHIPPING.value
 
+    # Customer cannot cancel an order once it is in READY_FOR_SHIPPING
+    cancel_after_ship = await async_client.post(
+        f"/orders/{order_id}/cancel", headers={"X-User-Id": user_id}
+    )
+    assert cancel_after_ship.status_code == 409
+
     complete_resp = await async_client.post(
         f"/orders/{order_id}/complete",
-        headers={"X-User-Role": "warehouse"},
+        headers={
+            "X-Internal-Token": settings.internal_api_token,
+            "X-User-Role": "warehouse",
+        },
     )
     assert complete_resp.status_code == 200
     assert complete_resp.json()["status"] == OrderStatus.COMPLETED.value
@@ -370,3 +385,15 @@ async def test_emitted_outbox_payloads_match_contract_schemas(
     assert set(by_topic["order.completed"]["items"][0].keys()) == set(
         completed_contract["items"][0].keys()
     )
+
+
+async def test_requeue_parked_events_endpoint(async_client: AsyncClient, db_session):
+    resp_unauth = await async_client.post("/orders/maintenance/requeue-parked")
+    assert resp_unauth.status_code == 403
+
+    resp_auth = await async_client.post(
+        "/orders/maintenance/requeue-parked",
+        headers={"X-Internal-Token": settings.internal_api_token},
+    )
+    assert resp_auth.status_code == 200
+    assert "requeued_events" in resp_auth.json()

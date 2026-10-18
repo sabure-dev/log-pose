@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -308,15 +309,23 @@ func (c *OrderConsumer) retryOrDeadLetter(ctx context.Context, d amqp.Delivery, 
 
 	headers := amqp.Table{}
 	for k, v := range d.Headers {
+		// Do not forward any death-related headers into retryQueueName to prevent RabbitMQ cycle detection from dropping retried messages.
+		if strings.Contains(k, "death") {
+			continue
+		}
 		headers[k] = v
 	}
 	headers["x-retry-count"] = int32(attempts)
 	headers["x-original-routing-key"] = effectiveRoutingKey(d)
 
+	// Use an independent context for retry publication so it does not inherit an exhausted database context timeout.
+	retryCtx, retryCancel := context.WithTimeout(context.WithoutCancel(ctx), retryConfirmTimeout)
+	defer retryCancel()
+
 	// Publish to retryQueueName via default exchange ("") with uniform TTL to avoid FIFO head-of-line blocking,
 	// and wait for broker publisher confirm before acknowledging the original delivery.
 	dc, pubErr := c.publishRetry(
-		ctx,
+		retryCtx,
 		"",
 		retryQueueName,
 		false,
@@ -331,15 +340,15 @@ func (c *OrderConsumer) retryOrDeadLetter(ctx context.Context, d amqp.Delivery, 
 		},
 	)
 	if pubErr != nil {
-		_ = d.Nack(false, true)
+		slog.Error("Failed to publish to retry queue, sending to DLQ", "order_id", orderID, "error", pubErr)
+		_ = d.Nack(false, false)
 		return
 	}
 
-	cctx, cancel := context.WithTimeout(ctx, retryConfirmTimeout)
-	ok, confirmErr := dc.WaitContext(cctx)
-	cancel()
+	ok, confirmErr := dc.WaitContext(retryCtx)
 	if confirmErr != nil || !ok {
-		_ = d.Nack(false, true)
+		slog.Error("Retry publish confirm failed, sending to DLQ", "order_id", orderID, "error", confirmErr)
+		_ = d.Nack(false, false)
 		return
 	}
 

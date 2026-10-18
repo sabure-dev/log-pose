@@ -99,6 +99,9 @@ func (r *OutboxRelay) Run(ctx context.Context) error {
 	cleanupTicker := time.NewTicker(10 * time.Minute)
 	defer cleanupTicker.Stop()
 
+	requeueTicker := time.NewTicker(15 * time.Minute)
+	defer requeueTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -108,6 +111,12 @@ func (r *OutboxRelay) Run(ctx context.Context) error {
 				return fmt.Errorf("outbox relay amqp channel closed: %w", amqpErr)
 			}
 			return fmt.Errorf("outbox relay amqp channel closed")
+		case <-requeueTicker.C:
+			if requeued, err := r.RequeueParkedEvents(context.WithoutCancel(ctx)); err != nil {
+				slog.Warn("Failed to requeue parked outbox events", "error", err)
+			} else if requeued > 0 {
+				slog.Warn("Requeued parked outbox events for retry", "count", requeued)
+			}
 		case <-cleanupTicker.C:
 			if _, err := r.CleanupProcessedEvents(ctx, 7*24*time.Hour, cleanupBatchLimit); err != nil {
 				slog.Warn("Failed to cleanup old outbox events", "error", err)
@@ -206,13 +215,15 @@ func (r *OutboxRelay) ProcessBatch(ctx context.Context) error {
 		if pubErr != nil {
 			nextAttempt := e.attempts + 1
 			backoffSeconds := min(1<<min(nextAttempt, 9), MaxBackoffSeconds)
-			_, dbErr := r.pool.Exec(ctx, `
+			updateCtx, updateCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			_, dbErr := r.pool.Exec(updateCtx, `
 				UPDATE outbox_events
 				SET attempts = $2,
 				    last_error = $3,
 				    next_retry_at = NOW() + ($4 * INTERVAL '1 second')
 				WHERE id = $1
 			`, e.id, nextAttempt, pubErr.Error(), backoffSeconds)
+			updateCancel()
 			if dbErr != nil {
 				return fmt.Errorf("failed to record failure for outbox event %s: %w", e.id, dbErr)
 			}
@@ -227,13 +238,15 @@ func (r *OutboxRelay) ProcessBatch(ctx context.Context) error {
 			continue
 		}
 
-		_, err = r.pool.Exec(ctx, `
+		updateCtx, updateCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		_, err = r.pool.Exec(updateCtx, `
 			UPDATE outbox_events
 			SET processed = TRUE,
 			    last_error = NULL,
 			    next_retry_at = NULL
 			WHERE id = $1
 		`, e.id)
+		updateCancel()
 		if err != nil {
 			return fmt.Errorf("failed to mark outbox event %s as processed: %w", e.id, err)
 		}
