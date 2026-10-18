@@ -82,7 +82,8 @@ async def _retry_or_dead_letter(
         )
     except Exception as pub_err:
         logger.error(
-            f"Failed to publish message to retry queue, requeueing with backoff: {pub_err}"
+            f"Failed to publish message to retry queue, "
+            f"requeueing with backoff: {pub_err}"
         )
         await asyncio.sleep(0.5)
         await message.nack(requeue=True)

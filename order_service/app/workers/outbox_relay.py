@@ -111,7 +111,8 @@ async def process_outbox_batch(
                 except Exception as commit_exc:
                     await session.rollback()
                     logger.error(
-                        f"Failed to record publish error for event {event.id}: {commit_exc}"
+                        f"Failed to record publish error "
+                        f"for event {event.id}: {commit_exc}"
                     )
                 if next_attempt >= MAX_OUTBOX_ATTEMPTS:
                     logger.error(
@@ -135,7 +136,8 @@ async def process_outbox_batch(
                 except Exception as commit_exc:
                     await session.rollback()
                     logger.error(
-                        f"Failed to commit processed status for event {event.id} after publish: {commit_exc}"
+                        f"Failed to commit processed status for "
+                        f"event {event.id} after publish: {commit_exc}"
                     )
         finally:
             correlation_id_ctx.reset(token)
@@ -230,7 +232,8 @@ async def run_outbox_relay():
                             logger.error(
                                 f"ALERT: {parked_count} outbox event(s) are PARKED "
                                 f"(attempts >= {MAX_OUTBOX_ATTEMPTS}). "
-                                "Manual inspection or recovery required via POST /orders/maintenance/requeue-parked"
+                                "Manual inspection or recovery required via "
+                                "POST /orders/maintenance/requeue-parked"
                             )
 
                     if processed_count == 0:
