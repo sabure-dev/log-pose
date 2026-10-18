@@ -6,6 +6,7 @@ from app.models import OutboxEvent
 from app.workers.outbox_relay import (
     MAX_OUTBOX_ATTEMPTS,
     cleanup_processed_outbox_events,
+    count_parked_outbox_events,
     fetch_unprocessed_events,
     process_outbox_batch,
     requeue_parked_outbox_events,
@@ -37,6 +38,9 @@ async def test_fetch_unprocessed_events_and_requeue_parked(db_session):
     db_session.add_all([event_unprocessed, event_processed, event_parked])
     await db_session.commit()
 
+    parked_count = await count_parked_outbox_events(db_session)
+    assert parked_count == 1
+
     events = await fetch_unprocessed_events(db_session, batch_size=10)
 
     assert len(events) == 1
@@ -45,6 +49,9 @@ async def test_fetch_unprocessed_events_and_requeue_parked(db_session):
 
     requeued = await requeue_parked_outbox_events(db_session)
     assert requeued == 1
+
+    parked_after = await count_parked_outbox_events(db_session)
+    assert parked_after == 0
 
     events_after = await fetch_unprocessed_events(db_session, batch_size=10)
     assert len(events_after) == 2

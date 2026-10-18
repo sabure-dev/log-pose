@@ -118,7 +118,7 @@ services:
     environment:
       DATABASE_URL: "postgres://inventory_user:${INVENTORY_DB_PASSWORD}@postgres:5432/inventory_db?sslmode=disable"
       RABBITMQ_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/"
-      SEED_CATALOG: "${SEED_CATALOG:-false}"
+      SEED_CATALOG: "${SEED_CATALOG:-true}"
     restart: unless-stopped
     networks:
       - logpose_net

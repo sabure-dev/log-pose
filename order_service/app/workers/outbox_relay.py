@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
 import aio_pika
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -80,6 +80,7 @@ async def process_outbox_batch(
             else ""
         )
         token = correlation_id_ctx.set(corr_id)
+        publish_ok = False
         try:
             body = json.dumps(event.payload, default=str).encode("utf-8")
             msg = aio_pika.Message(
@@ -95,35 +96,63 @@ async def process_outbox_batch(
                 mandatory=True,
                 timeout=PUBLISH_TIMEOUT_SECONDS,
             )
-            event.processed = True
-            event.last_error = None
-            event.next_retry_at = None
-            published_count += 1
-            await session.commit()
-            logger.info(f"Event sent: {event.topic} (ID: {event.id})")
-        except Exception as exc:
+            publish_ok = True
+        except Exception as pub_exc:
             next_attempt = (event.attempts or 0) + 1
             backoff_seconds = min(1 << min(next_attempt, 9), MAX_BACKOFF_SECONDS)
             event.attempts = next_attempt
-            event.last_error = str(exc)
+            event.last_error = str(pub_exc)
             event.next_retry_at = datetime.now(timezone.utc) + timedelta(
                 seconds=backoff_seconds
             )
-            await session.commit()
+            try:
+                await session.commit()
+            except Exception as commit_exc:
+                await session.rollback()
+                logger.error(
+                    f"Failed to record publish error for event {event.id}: {commit_exc}"
+                )
             if next_attempt >= MAX_OUTBOX_ATTEMPTS:
                 logger.error(
                     f"Outbox event {event.id} ({event.topic}) parked after "
-                    f"{next_attempt} attempts: {exc}"
+                    f"{next_attempt} attempts: {pub_exc}"
                 )
             else:
                 logger.warning(
                     f"Failed to publish outbox event {event.id} ({event.topic}), "
-                    f"attempt {next_attempt}/{MAX_OUTBOX_ATTEMPTS}: {exc}"
+                    f"attempt {next_attempt}/{MAX_OUTBOX_ATTEMPTS}: {pub_exc}"
+                )
+
+        if publish_ok:
+            event.processed = True
+            event.last_error = None
+            event.next_retry_at = None
+            try:
+                await session.commit()
+                published_count += 1
+                logger.info(f"Event sent: {event.topic} (ID: {event.id})")
+            except Exception as commit_exc:
+                await session.rollback()
+                logger.error(
+                    f"Failed to commit processed status for event {event.id} after publish: {commit_exc}"
                 )
         finally:
             correlation_id_ctx.reset(token)
 
     return published_count
+
+
+async def count_parked_outbox_events(session: AsyncSession) -> int:
+    stmt = (
+        select(func.count())
+        .select_from(OutboxEvent)
+        .where(
+            OutboxEvent.processed.is_(False),
+            OutboxEvent.attempts >= MAX_OUTBOX_ATTEMPTS,
+        )
+    )
+    result = await session.execute(stmt)
+    return int(result.scalar_one() or 0)
 
 
 async def requeue_parked_outbox_events(session: AsyncSession) -> int:
@@ -195,10 +224,12 @@ async def run_outbox_relay():
                         if expired > 0:
                             logger.info(f"Expired {expired} stale pending orders")
                         await cleanup_processed_outbox_events(session)
-                        requeued = await requeue_parked_outbox_events(session)
-                        if requeued > 0:
-                            logger.warning(
-                                f"Requeued {requeued} parked outbox events for retry"
+                        parked_count = await count_parked_outbox_events(session)
+                        if parked_count > 0:
+                            logger.error(
+                                f"ALERT: {parked_count} outbox event(s) are PARKED "
+                                f"(attempts >= {MAX_OUTBOX_ATTEMPTS}). "
+                                "Manual inspection or recovery required via POST /orders/maintenance/requeue-parked"
                             )
 
                     if processed_count == 0:

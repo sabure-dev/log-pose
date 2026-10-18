@@ -340,15 +340,17 @@ func (c *OrderConsumer) retryOrDeadLetter(ctx context.Context, d amqp.Delivery, 
 		},
 	)
 	if pubErr != nil {
-		slog.Error("Failed to publish to retry queue, sending to DLQ", "order_id", orderID, "error", pubErr)
-		_ = d.Nack(false, false)
+		slog.Error("Failed to publish to retry queue, requeueing with delay", "order_id", orderID, "error", pubErr)
+		time.Sleep(500 * time.Millisecond)
+		_ = d.Nack(false, true)
 		return
 	}
 
 	ok, confirmErr := dc.WaitContext(retryCtx)
 	if confirmErr != nil || !ok {
-		slog.Error("Retry publish confirm failed, sending to DLQ", "order_id", orderID, "error", confirmErr)
-		_ = d.Nack(false, false)
+		slog.Error("Retry publish confirm failed, requeueing with delay", "order_id", orderID, "error", confirmErr)
+		time.Sleep(500 * time.Millisecond)
+		_ = d.Nack(false, true)
 		return
 	}
 
