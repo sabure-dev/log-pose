@@ -60,7 +60,12 @@ async def test_create_order_endpoint(async_client: AsyncClient, db_session):
     assert events[0]["topic"] == "order.created"
     assert not events[0]["processed"]
 
-    payload_data = json.loads(events[0]["payload"])
+    raw_payload = events[0]["payload"]
+    payload_data = (
+        json.loads(raw_payload)
+        if isinstance(raw_payload, (str, bytes))
+        else raw_payload
+    )
     assert payload_data["total_amount"] == "3301.00"
     assert payload_data["user_id"] == custom_user_id
     assert payload_data["shipping_address"] == "Main Street 10"
@@ -368,7 +373,14 @@ async def test_emitted_outbox_payloads_match_contract_schemas(
         text("SELECT topic, payload FROM outbox_events ORDER BY created_at ASC")
     )
     rows = result.mappings().all()
-    by_topic = {row["topic"]: json.loads(row["payload"]) for row in rows}
+    by_topic = {
+        row["topic"]: (
+            json.loads(row["payload"])
+            if isinstance(row["payload"], (str, bytes))
+            else row["payload"]
+        )
+        for row in rows
+    }
 
     assert set(by_topic["order.created"].keys()) == set(created_contract.keys())
     assert set(by_topic["order.created"]["items"][0].keys()) == set(
