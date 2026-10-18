@@ -350,7 +350,13 @@ func (r *InventoryRepository) Confirm(ctx context.Context, event domain.OrderCom
 				"SELECT status FROM reservations WHERE order_id = $1",
 				event.OrderID,
 			).Scan(&existingStatus)
-			if statusErr == nil && existingStatus == "CONFIRMED" {
+			if statusErr != nil {
+				if errors.Is(statusErr, pgx.ErrNoRows) {
+					return fmt.Errorf("%w: reservation for order %s not found", ErrCorruptedReservation, event.OrderID)
+				}
+				return fmt.Errorf("failed to check reservation status for %s: %w", event.OrderID, statusErr)
+			}
+			if existingStatus == "CONFIRMED" {
 				return nil
 			}
 			return fmt.Errorf(

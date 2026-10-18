@@ -99,8 +99,8 @@ func (r *OutboxRelay) Run(ctx context.Context) error {
 	cleanupTicker := time.NewTicker(10 * time.Minute)
 	defer cleanupTicker.Stop()
 
-	requeueTicker := time.NewTicker(15 * time.Minute)
-	defer requeueTicker.Stop()
+	parkedAlertTicker := time.NewTicker(5 * time.Minute)
+	defer parkedAlertTicker.Stop()
 
 	for {
 		select {
@@ -111,16 +111,20 @@ func (r *OutboxRelay) Run(ctx context.Context) error {
 				return fmt.Errorf("outbox relay amqp channel closed: %w", amqpErr)
 			}
 			return fmt.Errorf("outbox relay amqp channel closed")
-		case <-requeueTicker.C:
-			if requeued, err := r.RequeueParkedEvents(context.WithoutCancel(ctx)); err != nil {
-				slog.Warn("Failed to requeue parked outbox events", "error", err)
-			} else if requeued > 0 {
-				slog.Warn("Requeued parked outbox events for retry", "count", requeued)
+		case <-parkedAlertTicker.C:
+			checkCtx, checkCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			if count, err := r.CountParkedEvents(checkCtx); err != nil {
+				slog.Warn("Failed to count parked outbox events", "error", err)
+			} else if count > 0 {
+				slog.Error("ALERT: Outbox events are PARKED (attempts >= max); manual intervention required", "parked_count", count)
 			}
+			checkCancel()
 		case <-cleanupTicker.C:
-			if _, err := r.CleanupProcessedEvents(ctx, 7*24*time.Hour, cleanupBatchLimit); err != nil {
+			cleanCtx, cleanCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			if _, err := r.CleanupProcessedEvents(cleanCtx, 7*24*time.Hour, cleanupBatchLimit); err != nil {
 				slog.Warn("Failed to cleanup old outbox events", "error", err)
 			}
+			cleanCancel()
 		case <-ticker.C:
 			if err := r.ProcessBatch(ctx); err != nil {
 				slog.Error("Failed to process outbox batch", "error", err)
@@ -253,6 +257,20 @@ func (r *OutboxRelay) ProcessBatch(ctx context.Context) error {
 	}
 
 	return batchErr
+}
+
+// CountParkedEvents returns the number of unprocessed outbox events that have reached maximum attempts.
+func (r *OutboxRelay) CountParkedEvents(ctx context.Context) (int64, error) {
+	var count int64
+	err := r.pool.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM outbox_events
+		WHERE processed = FALSE AND attempts >= $1
+	`, r.maxRetries).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count parked outbox events: %w", err)
+	}
+	return count, nil
 }
 
 // RequeueParkedEvents resets attempts and next_retry_at for parked events so they can be retried after recovery.

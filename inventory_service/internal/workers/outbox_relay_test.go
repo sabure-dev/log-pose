@@ -158,6 +158,11 @@ func TestOutboxRelay_ParksEventAfterMaxAttemptsAndRequeues(t *testing.T) {
 		t.Fatalf("expected attempts=%d, got %d", workers.MaxOutboxAttempts, attempts)
 	}
 
+	parkedCount, err := relay.CountParkedEvents(ctx)
+	if err != nil || parkedCount != 1 {
+		t.Fatalf("expected 1 parked event from CountParkedEvents, got %d (err=%v)", parkedCount, err)
+	}
+
 	// Next ProcessBatch should skip the parked event completely
 	called := false
 	relay2 := workers.NewOutboxRelayWithPublisher(pool, func(ctx context.Context, exchange, key string, mandatory, immediate bool, msg amqp.Publishing) (workers.DeferredConfirmation, error) {
@@ -177,6 +182,12 @@ func TestOutboxRelay_ParksEventAfterMaxAttemptsAndRequeues(t *testing.T) {
 	if err != nil || requeued != 1 {
 		t.Fatalf("expected 1 requeued event, got %d (err=%v)", requeued, err)
 	}
+
+	parkedAfter, err := relay2.CountParkedEvents(ctx)
+	if err != nil || parkedAfter != 0 {
+		t.Fatalf("expected 0 parked events after requeue, got %d (err=%v)", parkedAfter, err)
+	}
+
 	if err := relay2.ProcessBatch(ctx); err != nil {
 		t.Fatalf("expected requeued event to succeed on ProcessBatch, got %v", err)
 	}
