@@ -344,7 +344,21 @@ func (r *InventoryRepository) Confirm(ctx context.Context, event domain.OrderCom
 	`, event.OrderID).Scan(&itemsJSON)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
+			var existingStatus string
+			statusErr := tx.QueryRow(
+				ctx,
+				"SELECT status FROM reservations WHERE order_id = $1",
+				event.OrderID,
+			).Scan(&existingStatus)
+			if statusErr == nil && existingStatus == "CONFIRMED" {
+				return nil
+			}
+			return fmt.Errorf(
+				"%w: cannot confirm reservation for order %s (status=%q)",
+				ErrCorruptedReservation,
+				event.OrderID,
+				existingStatus,
+			)
 		}
 		return fmt.Errorf("failed to confirm reservation: %w", err)
 	}

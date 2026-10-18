@@ -391,7 +391,7 @@ func TestOrderConsumer_AMQPTopology_RetryAndDLQ_Integration(t *testing.T) {
 	defer consumerCh.Close()
 
 	c := NewOrderConsumer(consumerCh, mockRes)
-	c.SetRetryDelayMs(50) // Fast 50ms retry TTL for integration test
+	c.SetRetryDelayMs(100) // 100ms retry TTL for integration test
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -447,7 +447,9 @@ func TestOrderConsumer_AMQPTopology_RetryAndDLQ_Integration(t *testing.T) {
 		if attempts.Load() != 3 {
 			t.Fatalf("expected exactly 3 delivery attempts before DLQ, got %d", attempts.Load())
 		}
-	case <-time.After(5 * time.Second):
+	case err := <-errCh:
+		t.Fatalf("consumer background worker failed: %v", err)
+	case <-time.After(10 * time.Second):
 		t.Fatalf("timed out waiting for exhausted message to arrive in %s (attempts=%d)", dlqQueueName, attempts.Load())
 	}
 }

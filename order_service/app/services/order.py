@@ -19,6 +19,11 @@ VALID_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
     OrderStatus.CANCELLED: set(),
 }
 
+CUSTOMER_CANCELLABLE_STATUSES: set[OrderStatus] = {
+    OrderStatus.PENDING,
+    OrderStatus.RESERVED,
+}
+
 
 def _normalize_idempotency_key(raw: str | None) -> str | None:
     if not raw:
@@ -148,7 +153,7 @@ class OrderService:
         user_id: uuid.UUID,
         reason: str = "cancelled by user",
     ) -> OrderEntity:
-        truncated_reason = reason[:500] if reason else "cancelled by user"
+        truncated_reason = str(reason)[:500] if reason else "cancelled by user"
         async with self.uow:
             order = await self.uow.orders.get_for_update(order_id)
             if not order or order.user_id != user_id:
@@ -158,9 +163,7 @@ class OrderService:
             if current_status == OrderStatus.CANCELLED:
                 return order
 
-            if OrderStatus.CANCELLED not in VALID_TRANSITIONS.get(
-                current_status, set()
-            ):
+            if current_status not in CUSTOMER_CANCELLABLE_STATUSES:
                 raise InvalidTransition(
                     f"Cannot cancel order with status {current_status.value}"
                 )
@@ -250,7 +253,9 @@ class OrderService:
                 )
 
             cancellation_reason = (
-                reason[:500] if (status == OrderStatus.CANCELLED and reason) else None
+                str(reason)[:500]
+                if (status == OrderStatus.CANCELLED and reason)
+                else None
             )
             updated_order = await self.uow.orders.update_status(
                 order_id, status, cancellation_reason=cancellation_reason

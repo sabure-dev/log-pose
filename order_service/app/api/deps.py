@@ -34,6 +34,13 @@ def get_current_user_id(
     return x_user_id
 
 
+def _safe_compare_digest(val: str, expected: str) -> bool:
+    try:
+        return secrets.compare_digest(val.encode("utf-8"), expected.encode("utf-8"))
+    except (TypeError, UnicodeError):
+        return False
+
+
 def verify_operator_access(
     x_internal_token: Annotated[
         str | None,
@@ -50,16 +57,21 @@ def verify_operator_access(
         ),
     ] = None,
 ) -> None:
-    if x_internal_token and secrets.compare_digest(
+    if not x_internal_token or not _safe_compare_digest(
         x_internal_token, settings.internal_api_token
     ):
-        return
-    if x_user_role and x_user_role.strip().lower() in ALLOWED_OPERATOR_ROLES:
-        return
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail="Operator role or valid X-Internal-Token required",
-    )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Valid X-Internal-Token required",
+        )
+    if (
+        x_user_role is not None
+        and x_user_role.strip().lower() not in ALLOWED_OPERATOR_ROLES
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Operator role required",
+        )
 
 
 OrderServiceDep = Annotated[OrderService, Depends(get_order_service)]

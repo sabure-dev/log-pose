@@ -150,3 +150,18 @@ async def complete_order(
         )
     except InvalidTransition as err:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(err))
+
+
+@router.post(
+    "/maintenance/requeue-parked",
+    status_code=status.HTTP_200_OK,
+    summary="Requeue parked outbox events for retry (Operator only)",
+)
+async def requeue_parked_events(
+    _operator: OperatorAuthDep,
+    session: AsyncSession = Depends(get_db),
+) -> dict[str, int]:
+    from app.workers.outbox_relay import requeue_parked_outbox_events
+
+    requeued = await requeue_parked_outbox_events(session)
+    return {"requeued_events": requeued}

@@ -39,7 +39,12 @@ async def test_uow_can_save_order_and_outbox_event_atomically(db_session):
     assert events[0]["topic"] == "test.topic"
     assert not events[0]["processed"]
 
-    payload_data = json.loads(events[0]["payload"])
+    raw_payload = events[0]["payload"]
+    payload_data = (
+        json.loads(raw_payload)
+        if isinstance(raw_payload, (str, bytes))
+        else raw_payload
+    )
 
     assert payload_data["test_key"] == "test_value"
     assert payload_data["order_id"] == str(order.id)
