@@ -80,62 +80,63 @@ async def process_outbox_batch(
             else ""
         )
         token = correlation_id_ctx.set(corr_id)
-        publish_ok = False
         try:
-            body = json.dumps(event.payload, default=str).encode("utf-8")
-            msg = aio_pika.Message(
-                body=body,
-                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-                message_id=str(event.id),
-                content_type="application/json",
-            )
-
-            await exchange.publish(
-                msg,
-                routing_key=event.topic,
-                mandatory=True,
-                timeout=PUBLISH_TIMEOUT_SECONDS,
-            )
-            publish_ok = True
-        except Exception as pub_exc:
-            next_attempt = (event.attempts or 0) + 1
-            backoff_seconds = min(1 << min(next_attempt, 9), MAX_BACKOFF_SECONDS)
-            event.attempts = next_attempt
-            event.last_error = str(pub_exc)
-            event.next_retry_at = datetime.now(timezone.utc) + timedelta(
-                seconds=backoff_seconds
-            )
+            publish_ok = False
             try:
-                await session.commit()
-            except Exception as commit_exc:
-                await session.rollback()
-                logger.error(
-                    f"Failed to record publish error for event {event.id}: {commit_exc}"
-                )
-            if next_attempt >= MAX_OUTBOX_ATTEMPTS:
-                logger.error(
-                    f"Outbox event {event.id} ({event.topic}) parked after "
-                    f"{next_attempt} attempts: {pub_exc}"
-                )
-            else:
-                logger.warning(
-                    f"Failed to publish outbox event {event.id} ({event.topic}), "
-                    f"attempt {next_attempt}/{MAX_OUTBOX_ATTEMPTS}: {pub_exc}"
+                body = json.dumps(event.payload, default=str).encode("utf-8")
+                msg = aio_pika.Message(
+                    body=body,
+                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                    message_id=str(event.id),
+                    content_type="application/json",
                 )
 
-        if publish_ok:
-            event.processed = True
-            event.last_error = None
-            event.next_retry_at = None
-            try:
-                await session.commit()
-                published_count += 1
-                logger.info(f"Event sent: {event.topic} (ID: {event.id})")
-            except Exception as commit_exc:
-                await session.rollback()
-                logger.error(
-                    f"Failed to commit processed status for event {event.id} after publish: {commit_exc}"
+                await exchange.publish(
+                    msg,
+                    routing_key=event.topic,
+                    mandatory=True,
+                    timeout=PUBLISH_TIMEOUT_SECONDS,
                 )
+                publish_ok = True
+            except Exception as pub_exc:
+                next_attempt = (event.attempts or 0) + 1
+                backoff_seconds = min(1 << min(next_attempt, 9), MAX_BACKOFF_SECONDS)
+                event.attempts = next_attempt
+                event.last_error = str(pub_exc)
+                event.next_retry_at = datetime.now(timezone.utc) + timedelta(
+                    seconds=backoff_seconds
+                )
+                try:
+                    await session.commit()
+                except Exception as commit_exc:
+                    await session.rollback()
+                    logger.error(
+                        f"Failed to record publish error for event {event.id}: {commit_exc}"
+                    )
+                if next_attempt >= MAX_OUTBOX_ATTEMPTS:
+                    logger.error(
+                        f"Outbox event {event.id} ({event.topic}) parked after "
+                        f"{next_attempt} attempts: {pub_exc}"
+                    )
+                else:
+                    logger.warning(
+                        f"Failed to publish outbox event {event.id} ({event.topic}), "
+                        f"attempt {next_attempt}/{MAX_OUTBOX_ATTEMPTS}: {pub_exc}"
+                    )
+
+            if publish_ok:
+                event.processed = True
+                event.last_error = None
+                event.next_retry_at = None
+                try:
+                    await session.commit()
+                    published_count += 1
+                    logger.info(f"Event sent: {event.topic} (ID: {event.id})")
+                except Exception as commit_exc:
+                    await session.rollback()
+                    logger.error(
+                        f"Failed to commit processed status for event {event.id} after publish: {commit_exc}"
+                    )
         finally:
             correlation_id_ctx.reset(token)
 
