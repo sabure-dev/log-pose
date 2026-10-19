@@ -46,6 +46,12 @@ type Reserver interface {
 	Confirm(ctx context.Context, event domain.OrderCompletedEvent) error
 }
 
+type StockQuerier interface {
+	GetProductStock(ctx context.Context, productID uuid.UUID) (*domain.ProductStock, error)
+	ListProducts(ctx context.Context, limit, offset int) ([]domain.ProductStock, int, error)
+	CheckStockAvailability(ctx context.Context, items []domain.StockItemCheck) (*domain.AvailabilityCheckResult, error)
+}
+
 type InventoryRepository struct {
 	pool *pgxpool.Pool
 }
@@ -418,4 +424,161 @@ func (r *InventoryRepository) CleanupProcessedOutboxEvents(
 		return 0, fmt.Errorf("failed to cleanup processed outbox events: %w", err)
 	}
 	return cmdTag.RowsAffected(), nil
+}
+
+func (r *InventoryRepository) GetProductStock(ctx context.Context, productID uuid.UUID) (*domain.ProductStock, error) {
+	if productID == uuid.Nil {
+		return nil, ErrProductNotFound
+	}
+	var (
+		name      string
+		price     string
+		available int
+		reserved  int
+	)
+	err := r.pool.QueryRow(ctx, `
+		SELECT p.name, p.price::text, COALESCE(s.available, 0), COALESCE(s.reserved, 0)
+		FROM products p
+		LEFT JOIN inventory_stocks s ON p.id = s.product_id
+		WHERE p.id = $1
+	`, productID).Scan(&name, &price, &available, &reserved)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrProductNotFound
+		}
+		return nil, fmt.Errorf("failed to get product stock: %w", err)
+	}
+	return &domain.ProductStock{
+		ProductID: productID,
+		Name:      name,
+		Price:     price,
+		Available: available,
+		Reserved:  reserved,
+	}, nil
+}
+
+func (r *InventoryRepository) ListProducts(ctx context.Context, limit, offset int) ([]domain.ProductStock, int, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	var total int
+	if err := r.pool.QueryRow(ctx, "SELECT COUNT(*) FROM products").Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("failed to count products: %w", err)
+	}
+
+	rows, err := r.pool.Query(ctx, `
+		SELECT p.id, p.name, p.price::text, COALESCE(s.available, 0), COALESCE(s.reserved, 0)
+		FROM products p
+		LEFT JOIN inventory_stocks s ON p.id = s.product_id
+		ORDER BY p.name ASC
+		LIMIT $1 OFFSET $2
+	`, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to list products: %w", err)
+	}
+	defer rows.Close()
+
+	var products []domain.ProductStock
+	for rows.Next() {
+		var p domain.ProductStock
+		if err := rows.Scan(&p.ProductID, &p.Name, &p.Price, &p.Available, &p.Reserved); err != nil {
+			return nil, 0, fmt.Errorf("failed to scan product: %w", err)
+		}
+		products = append(products, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("products iteration error: %w", err)
+	}
+
+	return products, total, nil
+}
+
+func (r *InventoryRepository) CheckStockAvailability(ctx context.Context, items []domain.StockItemCheck) (*domain.AvailabilityCheckResult, error) {
+	if len(items) == 0 {
+		return &domain.AvailabilityCheckResult{
+			Eligible:      false,
+			OverallStatus: 5, // AVAILABILITY_STATUS_INVALID_QUANTITY
+			Reason:        "items list is empty",
+		}, nil
+	}
+
+	results := make([]domain.StockItemCheckResult, 0, len(items))
+	overallEligible := true
+	var firstFailedStatus int32
+	var firstFailedReason string
+
+	for _, item := range items {
+		res := domain.StockItemCheckResult{
+			ProductID: item.ProductID,
+		}
+
+		if item.ProductID == uuid.Nil {
+			res.StatusCode = 2 // AVAILABILITY_STATUS_PRODUCT_NOT_FOUND
+			res.Reason = "invalid product id"
+		} else if item.Quantity <= 0 {
+			res.StatusCode = 5 // AVAILABILITY_STATUS_INVALID_QUANTITY
+			res.Reason = "quantity must be greater than zero"
+		} else {
+			var (
+				catalogPrice string
+				available    int
+			)
+			err := r.pool.QueryRow(ctx, `
+				SELECT p.price::text, COALESCE(s.available, 0)
+				FROM products p
+				LEFT JOIN inventory_stocks s ON p.id = s.product_id
+				WHERE p.id = $1
+			`, item.ProductID).Scan(&catalogPrice, &available)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					res.StatusCode = 2 // AVAILABILITY_STATUS_PRODUCT_NOT_FOUND
+					res.Reason = "product not found in catalog"
+				} else {
+					return nil, fmt.Errorf("failed to query product %s: %w", item.ProductID, err)
+				}
+			} else {
+				res.CatalogPrice = catalogPrice
+				res.AvailableStock = available
+
+				if item.ExpectedPrice != "" && item.ExpectedPrice != catalogPrice {
+					res.StatusCode = 3 // AVAILABILITY_STATUS_PRICE_MISMATCH
+					res.Reason = fmt.Sprintf("expected price %s does not match catalog price %s", item.ExpectedPrice, catalogPrice)
+				} else if available < item.Quantity {
+					res.StatusCode = 4 // AVAILABILITY_STATUS_INSUFFICIENT_STOCK
+					res.Reason = fmt.Sprintf("insufficient stock: requested %d, available %d", item.Quantity, available)
+				} else {
+					res.StatusCode = 1 // AVAILABILITY_STATUS_OK
+				}
+			}
+		}
+
+		if res.StatusCode != 1 {
+			overallEligible = false
+			if firstFailedStatus == 0 {
+				firstFailedStatus = res.StatusCode
+				firstFailedReason = res.Reason
+			}
+		}
+
+		results = append(results, res)
+	}
+
+	var overallStatus int32 = 1
+	if !overallEligible {
+		overallStatus = firstFailedStatus
+	}
+
+	return &domain.AvailabilityCheckResult{
+		Eligible:      overallEligible,
+		OverallStatus: overallStatus,
+		Items:         results,
+		Reason:        firstFailedReason,
+	}, nil
 }

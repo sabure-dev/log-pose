@@ -10,6 +10,7 @@ type Config struct {
 	DatabaseURL string
 	RabbitMQURL string
 	SeedCatalog bool
+	GRPCPort    string
 }
 
 func Load() (*Config, error) {
@@ -26,9 +27,15 @@ func Load() (*Config, error) {
 	seedRaw := strings.ToLower(strings.TrimSpace(os.Getenv("SEED_CATALOG")))
 	seedCatalog := seedRaw == "true" || seedRaw == "1" || seedRaw == "yes"
 
+	grpcPort := strings.TrimSpace(os.Getenv("GRPC_PORT"))
+	if grpcPort == "" {
+		grpcPort = "50051"
+	}
+
 	return &Config{
 		DatabaseURL: dbURL,
 		RabbitMQURL: rmqURL,
 		SeedCatalog: seedCatalog,
+		GRPCPort:    grpcPort,
 	}, nil
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -12,8 +13,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 	"inventory_service/internal/config"
 	"inventory_service/internal/consumer"
+	"inventory_service/internal/grpcserver"
+	pb "inventory_service/internal/pb/inventoryv1"
 	"inventory_service/internal/repository"
 	"inventory_service/internal/workers"
 	"inventory_service/migrations"
@@ -86,6 +91,17 @@ func run() error {
 	orderConsumer := consumer.NewOrderConsumer(consumerCh, repo)
 	outboxRelay := workers.NewOutboxRelay(pool, relayCh)
 
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%s", cfg.GRPCPort))
+	if err != nil {
+		return fmt.Errorf("failed to listen on gRPC port %s: %w", cfg.GRPCPort, err)
+	}
+
+	grpcServer := grpc.NewServer(
+		grpc.UnaryInterceptor(grpcserver.UnaryLoggingInterceptor()),
+	)
+	pb.RegisterInventoryServiceServer(grpcServer, grpcserver.NewServer(repo))
+	reflection.Register(grpcServer)
+
 	g, gCtx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
@@ -94,6 +110,21 @@ func run() error {
 
 	g.Go(func() error {
 		return outboxRelay.Run(gCtx)
+	})
+
+	g.Go(func() error {
+		slog.Info("gRPC server listening", "port", cfg.GRPCPort)
+		if err := grpcServer.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			return fmt.Errorf("grpc server error: %w", err)
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		<-gCtx.Done()
+		slog.Info("Stopping gRPC server gracefully...")
+		grpcServer.GracefulStop()
+		return nil
 	})
 
 	if err := g.Wait(); err != nil && !errors.Is(err, context.Canceled) {
