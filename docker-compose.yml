@@ -6,14 +6,26 @@ x-order-env: &order-env
   DB_NAME: orders_db
   RABBITMQ_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/"
   INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-logpose-internal-secret}
+  INVENTORY_GRPC_HOST: inventory_service
+  INVENTORY_GRPC_PORT: 50051
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4318"
 
 services:
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    container_name: logpose_jaeger
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:16686:16686"
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    networks:
+      - logpose_net
+
   postgres:
     image: postgres:18-alpine
     container_name: logpose_postgres
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:5433:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -36,7 +48,6 @@ services:
     container_name: logpose_rabbitmq
     restart: unless-stopped
     ports:
-      - "127.0.0.1:5672:5672"
       - "127.0.0.1:15672:15672"
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
@@ -52,13 +63,15 @@ services:
   order_service:
     build: order_service/
     container_name: orders_api
-    ports:
-      - "127.0.0.1:8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      inventory_service:
+        condition: service_started
+      jaeger:
+        condition: service_started
     environment:
       <<: *order-env
     healthcheck:
@@ -86,6 +99,8 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      jaeger:
+        condition: service_started
     environment:
       <<: *order-env
     restart: always
@@ -101,6 +116,8 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      jaeger:
+        condition: service_started
     environment:
       <<: *order-env
     restart: always
@@ -115,11 +132,38 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      jaeger:
+        condition: service_started
     environment:
       DATABASE_URL: "postgres://inventory_user:${INVENTORY_DB_PASSWORD}@postgres:5432/inventory_db?sslmode=disable"
       RABBITMQ_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/"
       SEED_CATALOG: "${SEED_CATALOG:-true}"
       GRPC_PORT: "${GRPC_PORT:-50051}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4318"
+    restart: unless-stopped
+    networks:
+      - logpose_net
+
+  gateway_service:
+    build: gateway_service/
+    container_name: logpose_gateway_service
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      order_service:
+        condition: service_healthy
+      inventory_service:
+        condition: service_started
+      jaeger:
+        condition: service_started
+    environment:
+      PORT: "8080"
+      ORDER_SERVICE_URL: "http://order_service:8000"
+      INVENTORY_GRPC_HOST: "inventory_service"
+      INVENTORY_GRPC_PORT: "50051"
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-logpose-internal-secret}
+      JWT_SECRET: ${JWT_SECRET:-logpose-jwt-secret-key-change-in-production}
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4318"
     restart: unless-stopped
     networks:
       - logpose_net
