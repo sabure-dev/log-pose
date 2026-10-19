@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Sequence
 
-from app.domain import NewOrderItem, OrderEntity
+from app.domain import NewOrderItem, OrderEntity, StockAvailabilityResult
 from app.enums import OrderStatus
 
 
@@ -90,4 +90,12 @@ class AbstractUnitOfWork(ABC):
 
     @abstractmethod
     async def rollback(self):
+        raise NotImplementedError
+
+
+class AbstractInventoryClient(ABC):
+    @abstractmethod
+    async def check_stock_availability(
+        self, items: Sequence[NewOrderItem]
+    ) -> StockAvailabilityResult:
         raise NotImplementedError

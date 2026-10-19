@@ -8,7 +8,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import OperatorAuthDep, OrderServiceDep, UserIdDep
 from app.database import get_db
 from app.domain import NewOrderItem
-from app.exceptions import IdempotencyConflict, InvalidTransition, OrderNotFound
+from app.exceptions import (
+    IdempotencyConflict,
+    InsufficientStock,
+    InvalidQuantity,
+    InvalidTransition,
+    InventoryError,
+    OrderNotFound,
+    PriceMismatch,
+    ProductNotFound,
+)
 from app.schemas import OrderCreate, OrderRead
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
@@ -58,6 +67,26 @@ async def create_order(
     except IdempotencyConflict as err:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(err)
+        ) from err
+    except ProductNotFound as err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(err)
+        ) from err
+    except PriceMismatch as err:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(err)
+        ) from err
+    except InsufficientStock as err:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(err)
+        ) from err
+    except InvalidQuantity as err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(err)
+        ) from err
+    except InventoryError as err:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(err)
         ) from err
     return OrderRead.model_validate(order)
 
@@ -113,13 +142,9 @@ async def ship_order(
     order_id: uuid.UUID,
     service: OrderServiceDep,
     _operator: OperatorAuthDep,
-    x_user_id: Annotated[
-        uuid.UUID | None,
-        Header(alias="X-User-Id", description="Optional owner UUID filter"),
-    ] = None,
 ):
     try:
-        order = await service.ship_order(order_id, user_id=x_user_id)
+        order = await service.ship_order(order_id)
         return OrderRead.model_validate(order)
     except OrderNotFound:
         raise HTTPException(
@@ -136,13 +161,9 @@ async def complete_order(
     order_id: uuid.UUID,
     service: OrderServiceDep,
     _operator: OperatorAuthDep,
-    x_user_id: Annotated[
-        uuid.UUID | None,
-        Header(alias="X-User-Id", description="Optional owner UUID filter"),
-    ] = None,
 ):
     try:
-        order = await service.complete_order(order_id, user_id=x_user_id)
+        order = await service.complete_order(order_id)
         return OrderRead.model_validate(order)
     except OrderNotFound:
         raise HTTPException(

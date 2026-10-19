@@ -1,25 +1,43 @@
 import secrets
 import uuid
+from functools import lru_cache
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.clients.inventory import GrpcInventoryClient
 from app.config import settings
 from app.database import get_db
-from app.interfaces import AbstractUnitOfWork
+from app.interfaces import AbstractInventoryClient, AbstractUnitOfWork
 from app.repositories.uow import SqlAlchemyUnitOfWork
 from app.services.order import OrderService
 
-ALLOWED_OPERATOR_ROLES = {"admin", "operator", "warehouse"}
+ALLOWED_OPERATOR_ROLES = {
+    "admin",
+    "operator",
+    "warehouse",
+    "warehouse_operator",
+}
+
+
+@lru_cache
+def get_inventory_client() -> AbstractInventoryClient:
+    return GrpcInventoryClient(
+        host=settings.inventory_grpc_host,
+        port=settings.inventory_grpc_port,
+    )
 
 
 def get_uow(session: AsyncSession = Depends(get_db)) -> AbstractUnitOfWork:
     return SqlAlchemyUnitOfWork(session=session)
 
 
-def get_order_service(uow: AbstractUnitOfWork = Depends(get_uow)) -> OrderService:
-    return OrderService(uow=uow)
+def get_order_service(
+    uow: AbstractUnitOfWork = Depends(get_uow),
+    inventory_client: AbstractInventoryClient = Depends(get_inventory_client),
+) -> OrderService:
+    return OrderService(uow=uow, inventory_client=inventory_client)
 
 
 def get_current_user_id(
@@ -27,7 +45,7 @@ def get_current_user_id(
         uuid.UUID,
         Header(
             alias="X-User-Id",
-            description="UUID текущего пользователя",
+            description="Current authenticated user UUID",
         ),
     ],
 ) -> uuid.UUID:
@@ -46,14 +64,14 @@ def verify_operator_access(
         str | None,
         Header(
             alias="X-Internal-Token",
-            description="Служебный токен для складских/операторских операций",
+            description="Internal secret token for warehouse/operator operations",
         ),
     ] = None,
     x_user_role: Annotated[
         str | None,
         Header(
             alias="X-User-Role",
-            description="Роль пользователя из API Gateway (admin, operator, warehouse)",
+            description="User role from API Gateway",
         ),
     ] = None,
 ) -> None:

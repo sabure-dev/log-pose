@@ -15,6 +15,7 @@ from app.logging import correlation_id_ctx, setup_logging
 from app.models import OutboxEvent
 from app.repositories.uow import SqlAlchemyUnitOfWork
 from app.services.order import OrderService
+from app.telemetry import get_current_traceparent
 
 logger = logging.getLogger(__name__)
 
@@ -83,12 +84,24 @@ async def process_outbox_batch(
         try:
             publish_ok = False
             try:
+                traceparent = get_current_traceparent() or (
+                    event.payload.get("traceparent", "")
+                    if isinstance(event.payload, dict)
+                    else ""
+                )
+                headers = {}
+                if traceparent:
+                    headers["traceparent"] = traceparent
+                if corr_id:
+                    headers["x-correlation-id"] = corr_id
+
                 body = json.dumps(event.payload, default=str).encode("utf-8")
                 msg = aio_pika.Message(
                     body=body,
                     delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
                     message_id=str(event.id),
                     content_type="application/json",
+                    headers=headers,
                 )
 
                 await exchange.publish(
