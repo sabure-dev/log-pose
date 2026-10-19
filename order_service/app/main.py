@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from app.api.router import router
 from app.database import engine
 from app.logging import correlation_id_ctx, setup_logging
+from app.telemetry import init_telemetry
 
 setup_logging()
 logger = logging.getLogger("order_service")
@@ -17,7 +18,12 @@ logger = logging.getLogger("order_service")
 async def lifespan(app: FastAPI):
     logger.info("Order Service starting up...")
     yield
-    logger.info("Order Service shutting down, disposing database engine pool...")
+    logger.info("Order Service shutting down, closing gRPC channels and db pool...")
+    from app.api.deps import get_inventory_client
+
+    client = get_inventory_client()
+    if hasattr(client, "close"):
+        await client.close()
     await engine.dispose()
 
 
@@ -25,6 +31,8 @@ app = FastAPI(
     title="Order Service",
     lifespan=lifespan,
 )
+
+init_telemetry(app)
 
 
 @app.middleware("http")

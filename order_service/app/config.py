@@ -23,6 +23,20 @@ class Settings(BaseSettings):
     rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
     pending_order_timeout_seconds: int = 900
     internal_api_token: str = "logpose-internal-secret"
+    inventory_grpc_host: str = Field(
+        default="localhost",
+        validation_alias=AliasChoices("INVENTORY_GRPC_HOST", "inventory_grpc_host"),
+    )
+    inventory_grpc_port: int = Field(
+        default=50051,
+        validation_alias=AliasChoices("INVENTORY_GRPC_PORT", "inventory_grpc_port"),
+    )
+    otel_exporter_otlp_endpoint: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "OTEL_EXPORTER_OTLP_ENDPOINT", "otel_exporter_otlp_endpoint"
+        ),
+    )
 
     @computed_field
     @property

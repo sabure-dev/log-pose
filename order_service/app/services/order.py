@@ -7,8 +7,17 @@ from sqlalchemy.exc import IntegrityError
 
 from app.domain import NewOrderItem, OrderEntity
 from app.enums import OrderStatus
-from app.exceptions import IdempotencyConflict, InvalidTransition, OrderNotFound
-from app.interfaces import AbstractUnitOfWork
+from app.exceptions import (
+    IdempotencyConflict,
+    InsufficientStock,
+    InvalidQuantity,
+    InvalidTransition,
+    InventoryError,
+    OrderNotFound,
+    PriceMismatch,
+    ProductNotFound,
+)
+from app.interfaces import AbstractInventoryClient, AbstractUnitOfWork
 from app.logging import correlation_id_ctx
 
 VALID_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
@@ -52,8 +61,13 @@ def _matches_idempotent_request(
 
 
 class OrderService:
-    def __init__(self, uow: AbstractUnitOfWork):
+    def __init__(
+        self,
+        uow: AbstractUnitOfWork,
+        inventory_client: AbstractInventoryClient | None = None,
+    ):
         self.uow = uow
+        self.inventory_client = inventory_client
 
     async def create_new_order(
         self,
@@ -66,6 +80,39 @@ class OrderService:
         total_amount = sum(
             (item.price * item.quantity for item in items), Decimal("0.00")
         )
+
+        if normalized_key:
+            async with self.uow:
+                existing = await self.uow.orders.get_by_user_and_idempotency_key(
+                    user_id, normalized_key
+                )
+                if existing:
+                    if not _matches_idempotent_request(
+                        existing, items, shipping_address
+                    ):
+                        raise IdempotencyConflict(
+                            "Idempotency-Key already used with "
+                            "different order parameters"
+                        )
+                    return existing
+
+        if self.inventory_client is not None:
+            res = await self.inventory_client.check_stock_availability(items)
+            if not res.eligible:
+                if res.overall_status == "PRODUCT_NOT_FOUND":
+                    raise ProductNotFound(res.reason or "product not found in catalog")
+                elif res.overall_status == "PRICE_MISMATCH":
+                    raise PriceMismatch(
+                        res.reason or "item price does not match catalog"
+                    )
+                elif res.overall_status == "INSUFFICIENT_STOCK":
+                    raise InsufficientStock(res.reason or "insufficient stock")
+                elif res.overall_status == "INVALID_QUANTITY":
+                    raise InvalidQuantity(res.reason or "invalid item quantity")
+                else:
+                    raise InventoryError(
+                        res.reason or "inventory availability check failed"
+                    )
 
         async with self.uow:
             if normalized_key:

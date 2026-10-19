@@ -10,6 +10,12 @@ dependencies = [
     "asyncpg>=0.31.0",
     "fastapi[standard]>=0.139.0",
     "greenlet>=3.5.3",
+    "grpcio>=1.62.0",
+    "opentelemetry-api>=1.28.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.28.0",
+    "opentelemetry-instrumentation-fastapi>=0.49b0",
+    "opentelemetry-sdk>=1.28.0",
+    "protobuf>=5.29.0",
     "pydantic-settings>=2.14.2",
     "sqlalchemy>=2.0.51",
 ]
@@ -17,6 +23,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "aiosqlite>=0.22.1",
+    "grpcio-tools>=1.62.0",
     "httpx>=0.28.1",
     "pre-commit>=4.6.0",
     "pytest>=9.1.1",
@@ -31,6 +38,7 @@ extend-exclude = [
     ".venv",
     "__pycache__",
     "alembic",
+    "app/pb",
 ]
 line-length = 88
 target-version = "py313"
