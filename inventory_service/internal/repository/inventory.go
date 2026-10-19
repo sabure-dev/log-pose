@@ -547,14 +547,27 @@ func (r *InventoryRepository) CheckStockAvailability(ctx context.Context, items 
 				res.CatalogPrice = catalogPrice
 				res.AvailableStock = available
 
-				if item.ExpectedPrice != "" && item.ExpectedPrice != catalogPrice {
-					res.StatusCode = 3 // AVAILABILITY_STATUS_PRICE_MISMATCH
-					res.Reason = fmt.Sprintf("expected price %s does not match catalog price %s", item.ExpectedPrice, catalogPrice)
-				} else if available < item.Quantity {
-					res.StatusCode = 4 // AVAILABILITY_STATUS_INSUFFICIENT_STOCK
-					res.Reason = fmt.Sprintf("insufficient stock: requested %d, available %d", item.Quantity, available)
-				} else {
-					res.StatusCode = 1 // AVAILABILITY_STATUS_OK
+				if item.ExpectedPrice != "" {
+					if !isValidPositiveDecimalPrice(item.ExpectedPrice) {
+						res.StatusCode = 3 // AVAILABILITY_STATUS_PRICE_MISMATCH
+						res.Reason = "invalid expected price format"
+					} else {
+						var priceMatches bool
+						err := r.pool.QueryRow(ctx, "SELECT price = $1::numeric FROM products WHERE id = $2", item.ExpectedPrice, item.ProductID).Scan(&priceMatches)
+						if err != nil || !priceMatches {
+							res.StatusCode = 3 // AVAILABILITY_STATUS_PRICE_MISMATCH
+							res.Reason = fmt.Sprintf("expected price %s does not match catalog price %s", item.ExpectedPrice, catalogPrice)
+						}
+					}
+				}
+
+				if res.StatusCode == 0 {
+					if available < item.Quantity {
+						res.StatusCode = 4 // AVAILABILITY_STATUS_INSUFFICIENT_STOCK
+						res.Reason = fmt.Sprintf("insufficient stock: requested %d, available %d", item.Quantity, available)
+					} else {
+						res.StatusCode = 1 // AVAILABILITY_STATUS_OK
+					}
 				}
 			}
 		}
