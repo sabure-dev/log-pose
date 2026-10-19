@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -14,6 +15,7 @@ import (
 	"inventory_service/internal/domain"
 	pb "inventory_service/internal/pb/inventoryv1"
 	"inventory_service/internal/repository"
+	"inventory_service/internal/telemetry"
 )
 
 type Server struct {
@@ -144,6 +146,12 @@ func UnaryLoggingInterceptor() grpc.UnaryServerInterceptor {
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
 	) (any, error) {
+		// Extract incoming W3C traceparent and start server span
+		ctx = telemetry.ExtractGRPCMetadata(ctx)
+		tracer := telemetry.Tracer("inventory-service")
+		ctx, span := tracer.Start(ctx, info.FullMethod)
+		defer span.End()
+
 		start := time.Now()
 		var correlationID string
 		if md, ok := metadata.FromIncomingContext(ctx); ok {
@@ -156,12 +164,20 @@ func UnaryLoggingInterceptor() grpc.UnaryServerInterceptor {
 		duration := time.Since(start)
 
 		grpcCode := status.Code(err)
+		span.SetAttributes(
+			attribute.String("rpc.grpc.status_code", grpcCode.String()),
+			attribute.String("rpc.system", "grpc"),
+			attribute.String("rpc.method", info.FullMethod),
+		)
+
+		traceID := span.SpanContext().TraceID().String()
 		if err != nil {
 			slog.Warn("gRPC request failed",
 				"method", info.FullMethod,
 				"code", grpcCode.String(),
 				"duration", duration,
 				"correlation_id", correlationID,
+				"trace_id", traceID,
 				"error", err,
 			)
 		} else {
@@ -170,6 +186,7 @@ func UnaryLoggingInterceptor() grpc.UnaryServerInterceptor {
 				"code", grpcCode.String(),
 				"duration", duration,
 				"correlation_id", correlationID,
+				"trace_id", traceID,
 			)
 		}
 

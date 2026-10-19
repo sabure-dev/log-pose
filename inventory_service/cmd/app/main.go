@@ -20,6 +20,7 @@ import (
 	"inventory_service/internal/grpcserver"
 	pb "inventory_service/internal/pb/inventoryv1"
 	"inventory_service/internal/repository"
+	"inventory_service/internal/telemetry"
 	"inventory_service/internal/workers"
 	"inventory_service/migrations"
 )
@@ -44,6 +45,14 @@ func run() error {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	// Initialize OpenTelemetry tracer
+	shutdownTracer, err := telemetry.InitTracer(ctx, "inventory-service", cfg.OTLPEndpoint)
+	if err != nil {
+		slog.Warn("Failed to initialize OpenTelemetry", "error", err)
+	} else {
+		defer shutdownTracer(context.Background())
+	}
 
 	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
 	if err != nil {

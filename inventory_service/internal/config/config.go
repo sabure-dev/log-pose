@@ -7,10 +7,11 @@ import (
 )
 
 type Config struct {
-	DatabaseURL string
-	RabbitMQURL string
-	SeedCatalog bool
-	GRPCPort    string
+	DatabaseURL  string
+	RabbitMQURL  string
+	SeedCatalog  bool
+	GRPCPort     string
+	OTLPEndpoint string
 }
 
 func Load() (*Config, error) {
@@ -32,10 +33,13 @@ func Load() (*Config, error) {
 		grpcPort = "50051"
 	}
 
+	otlpEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+
 	return &Config{
-		DatabaseURL: dbURL,
-		RabbitMQURL: rmqURL,
-		SeedCatalog: seedCatalog,
-		GRPCPort:    grpcPort,
+		DatabaseURL:  dbURL,
+		RabbitMQURL:  rmqURL,
+		SeedCatalog:  seedCatalog,
+		GRPCPort:     grpcPort,
+		OTLPEndpoint: otlpEndpoint,
 	}, nil
 }
