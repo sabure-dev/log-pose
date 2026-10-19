@@ -6,6 +6,8 @@ High-performance Go 1.23 API Gateway serving as the single public perimeter ingr
 
 * **JWT Authentication & Role-Based Access Control:**
   * Public registration and login endpoints: `POST /api/v1/auth/register`, `POST /api/v1/auth/login`.
+  * **Strict Privilege Escalation Prevention:** Public registration strictly registers `customer` accounts; any attempt to self-assign `warehouse_operator` or `admin` returns `403 Forbidden`.
+  * **Admin Provisioning Endpoint:** `POST /api/v1/admin/users` allows authenticated administrators to provision `warehouse_operator` and `admin` accounts.
   * Persistent PostgreSQL user store (`PostgresUserStore`) using connection pooling with automatic schema initialization and demo user seeding.
   * Graceful fallback to thread-safe in-memory store (`MemoryUserStore`) when `DATABASE_URL` is not provided (e.g., unit tests).
   * Secure bcrypt password hashing and case-insensitive username uniqueness.

@@ -55,14 +55,13 @@ def main():
         sys.exit(1)
     print("      Gateway is healthy!")
 
-    # 2. Register Customer
+    # 2. Register Customer (Public registration)
     customer_username = f"customer_{uuid.uuid4().hex[:8]}"
     customer_password = "password123"
     print(f"[2/8] Registering Customer ({customer_username})...")
     status, cust_data = request("POST", "/api/v1/auth/register", {
         "username": customer_username,
         "password": customer_password,
-        "role": "customer",
     })
     if status != 201:
         print(f"FAILED: Customer registration returned {status}: {cust_data}")
@@ -71,20 +70,54 @@ def main():
     customer_id = cust_data["user_id"]
     print(f"      Customer registered! ID={customer_id}")
 
-    # 3. Register Operator
-    operator_username = f"operator_{uuid.uuid4().hex[:8]}"
-    operator_password = "operatorpass123"
-    print(f"[3/8] Registering Warehouse Operator ({operator_username})...")
-    status, oper_data = request("POST", "/api/v1/auth/register", {
-        "username": operator_username,
-        "password": operator_password,
+    # 2b. Verify Privilege Escalation Prevention (Security Assertion)
+    print("      Testing Privilege Escalation Prevention...")
+    rogue_status, rogue_data = request("POST", "/api/v1/auth/register", {
+        "username": f"rogue_{uuid.uuid4().hex[:8]}",
+        "password": "password123",
         "role": "warehouse_operator",
     })
-    if status != 201:
-        print(f"FAILED: Operator registration returned {status}: {oper_data}")
+    if rogue_status != 403:
+        print(f"FAILED: Expected 403 Forbidden for privileged self-registration, got {rogue_status}: {rogue_data}")
         sys.exit(1)
-    operator_token = oper_data["token"]
-    print("      Operator registered!")
+    print("      Privilege escalation attempt properly rejected with 403 Forbidden!")
+
+    # 3. Provision Warehouse Operator via Admin
+    operator_username = f"operator_{uuid.uuid4().hex[:8]}"
+    operator_password = "operatorpass123"
+    print(f"[3/8] Provisioning Warehouse Operator ({operator_username}) via Admin...")
+
+    # Log in as pre-seeded admin
+    admin_status, admin_data = request("POST", "/api/v1/auth/login", {
+        "username": "admin",
+        "password": "adminpass123",
+    })
+    if admin_status != 200:
+        print(f"FAILED: Admin login returned {admin_status}: {admin_data}")
+        sys.exit(1)
+    admin_token = admin_data["token"]
+
+    # Admin provisions the operator
+    prov_status, prov_data = request(
+        "POST",
+        "/api/v1/admin/users",
+        {"username": operator_username, "password": operator_password, "role": "warehouse_operator"},
+        token=admin_token,
+    )
+    if prov_status != 201:
+        print(f"FAILED: Admin operator provisioning returned {prov_status}: {prov_data}")
+        sys.exit(1)
+
+    # Operator logs in
+    oper_login_status, oper_login_data = request("POST", "/api/v1/auth/login", {
+        "username": operator_username,
+        "password": operator_password,
+    })
+    if oper_login_status != 200:
+        print(f"FAILED: Operator login returned {oper_login_status}: {oper_login_data}")
+        sys.exit(1)
+    operator_token = oper_login_data["token"]
+    print(f"      Operator {operator_username} provisioned and authenticated!")
 
     # 4. Browse Catalog via Gateway gRPC
     print("[4/8] Browsing warehouse catalog via Gateway...")
