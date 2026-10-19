@@ -13,6 +13,7 @@ type Config struct {
 	JWTSecret         string
 	InternalAPIToken  string
 	OTLPEndpoint      string
+	DatabaseURL       string
 }
 
 func Load() *Config {
@@ -50,6 +51,7 @@ func Load() *Config {
 	}
 
 	otlpEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
 
 	return &Config{
 		Port:              port,
@@ -59,5 +61,6 @@ func Load() *Config {
 		JWTSecret:         jwtSecret,
 		InternalAPIToken:  internalToken,
 		OTLPEndpoint:      otlpEndpoint,
+		DatabaseURL:       databaseURL,
 	}
 }

@@ -15,6 +15,12 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
         ELSE
             ALTER USER inventory_user WITH PASSWORD '${INVENTORY_DB_PASSWORD:-inventory_pass}';
         END IF;
+
+        IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'gateway_user') THEN
+            CREATE USER gateway_user WITH PASSWORD '${GATEWAY_DB_PASSWORD:-gateway_password}';
+        ELSE
+            ALTER USER gateway_user WITH PASSWORD '${GATEWAY_DB_PASSWORD:-gateway_password}';
+        END IF;
     END
     \$\$;
 
@@ -26,4 +32,10 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
 
     SELECT 'CREATE DATABASE inventory_test OWNER inventory_user'
     WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'inventory_test')\gexec
+
+    SELECT 'CREATE DATABASE gateway_db OWNER gateway_user'
+    WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'gateway_db')\gexec
+
+    SELECT 'CREATE DATABASE gateway_test OWNER gateway_user'
+    WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'gateway_test')\gexec
 EOSQL
