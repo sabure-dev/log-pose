@@ -13,6 +13,7 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 	"inventory_service/internal/domain"
 	"inventory_service/internal/repository"
+	"inventory_service/internal/telemetry"
 )
 
 const (
@@ -195,7 +196,11 @@ func (c *OrderConsumer) handleDelivery(parentCtx context.Context, d amqp.Deliver
 	processCtx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), 15*time.Second)
 	defer cancel()
 
+	processCtx = telemetry.ExtractAMQPHeaders(processCtx, d.Headers)
 	routingKey := effectiveRoutingKey(d)
+	tracer := telemetry.Tracer("inventory-service")
+	processCtx, span := tracer.Start(processCtx, "consumer."+routingKey)
+	defer span.End()
 
 	switch routingKey {
 	case "order.created":

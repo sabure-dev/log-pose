@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"inventory_service/internal/telemetry"
 )
 
 const (
@@ -312,6 +313,7 @@ func (r *OutboxRelay) CleanupProcessedEvents(ctx context.Context, retention time
 func (r *OutboxRelay) publishSingle(ctx context.Context, id uuid.UUID, topic string, payload []byte) error {
 	r.drainReturns()
 
+	headers := telemetry.InjectAMQPHeaders(ctx, make(amqp.Table))
 	dc, err := r.publishFn(
 		ctx,
 		"logpose_events",
@@ -322,6 +324,7 @@ func (r *OutboxRelay) publishSingle(ctx context.Context, id uuid.UUID, topic str
 			ContentType:  "application/json",
 			DeliveryMode: amqp.Persistent,
 			MessageId:    id.String(),
+			Headers:      headers,
 			Body:         payload,
 		},
 	)
