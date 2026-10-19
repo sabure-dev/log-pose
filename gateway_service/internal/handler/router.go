@@ -99,6 +99,12 @@ func NewRouter(cfg *RouterConfig) http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/register", cfg.AuthHandler.Register)
 	mux.HandleFunc("POST /api/v1/auth/login", cfg.AuthHandler.Login)
 
+	// Admin-only User Provisioning
+	adminUserHandler := cfg.AuthHandler.AuthMiddleware(
+		cfg.AuthHandler.RequireRole(auth.RoleAdmin)(http.HandlerFunc(cfg.AuthHandler.CreatePrivilegedUser)),
+	)
+	mux.Handle("POST /api/v1/admin/users", adminUserHandler)
+
 	// 3. Inventory Endpoints (Public or Authenticated catalog browsing)
 	mux.HandleFunc("GET /api/v1/inventory/products", cfg.InventoryHandler.ListProducts)
 	mux.HandleFunc("POST /api/v1/inventory/check", cfg.InventoryHandler.CheckStockAvailability)

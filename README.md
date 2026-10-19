@@ -155,8 +155,8 @@ python scripts/smoke_test.py
 
 The script automatically executes:
 1. Health check of API Gateway (`/health`).
-2. Customer registration via `/api/v1/auth/register`.
-3. Warehouse operator registration.
+2. Customer registration via public `/api/v1/auth/register`.
+3. Privilege escalation prevention verification (403 Forbidden) and admin provisioning of warehouse operator via `/api/v1/admin/users`.
 4. Catalog browsing over gRPC via `/api/v1/inventory/products`.
 5. Pre-flight stock validation over gRPC via `/api/v1/inventory/check`.
 6. Order creation through Gateway with JWT authentication.

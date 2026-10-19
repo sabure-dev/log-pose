@@ -23,6 +23,10 @@ const OpenAPISpec = `{
       "description": "User registration and JWT token issuance"
     },
     {
+      "name": "Admin",
+      "description": "Privileged user and role provisioning (Admin role required)"
+    },
+    {
       "name": "Inventory",
       "description": "Warehouse catalog and stock availability via gRPC"
     },
@@ -55,8 +59,8 @@ const OpenAPISpec = `{
     "/api/v1/auth/register": {
       "post": {
         "tags": ["Auth"],
-        "summary": "Register a new user",
-        "description": "Registers a new customer or warehouse operator and returns a signed JWT token.",
+        "summary": "Register a new customer account",
+        "description": "Registers a new customer and returns a signed JWT token. Public registration is strictly restricted to regular customers; privileged roles cannot be self-registered.",
         "requestBody": {
           "required": true,
           "content": {
@@ -78,7 +82,44 @@ const OpenAPISpec = `{
               }
             }
           },
+          "400": { "description": "Invalid input" },
+          "403": { "description": "Self-registration with privileged roles is forbidden" },
+          "409": { "description": "User already exists" }
+        }
+      }
+    },
+    "/api/v1/admin/users": {
+      "post": {
+        "tags": ["Admin"],
+        "summary": "Provision a privileged user account (Admin only)",
+        "description": "Creates a new warehouse operator or admin account. Strictly requires an authenticated user with admin role.",
+        "security": [
+          { "BearerAuth": [] }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Privileged user created successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResponse"
+                }
+              }
+            }
+          },
           "400": { "description": "Invalid input or unsupported role" },
+          "401": { "description": "Missing or invalid admin token" },
+          "403": { "description": "Insufficient permissions (admin role required)" },
           "409": { "description": "User already exists" }
         }
       }

@@ -36,13 +36,15 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	role, err := ValidateRole(req.Role)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	// Public self-registration is strictly restricted to regular customers.
+	// Attempting to self-assign privileged roles (operator/admin) returns 403 Forbidden.
+	cleanRole := strings.ToLower(strings.TrimSpace(req.Role))
+	if cleanRole != "" && Role(cleanRole) != RoleCustomer {
+		http.Error(w, "self-registration with privileged roles is forbidden", http.StatusForbidden)
 		return
 	}
 
-	user, err := h.store.CreateUser(r.Context(), req.Username, req.Password, role)
+	user, err := h.store.CreateUser(r.Context(), req.Username, req.Password, RoleCustomer)
 	if err != nil {
 		if errors.Is(err, ErrUserAlreadyExists) {
 			http.Error(w, "user already exists", http.StatusConflict)
@@ -125,5 +127,68 @@ func (h *Handler) AuthMiddleware(next http.Handler) http.Handler {
 
 		ctx := ContextWithUser(r.Context(), claims)
 		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// RequireRole returns a middleware verifying that the authenticated user has one of the allowed roles.
+func (h *Handler) RequireRole(allowedRoles ...Role) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims, ok := UserFromContext(r.Context())
+			if !ok || claims == nil {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			for _, allowed := range allowedRoles {
+				if claims.Role == allowed {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			http.Error(w, "forbidden: insufficient permissions", http.StatusForbidden)
+		})
+	}
+}
+
+// CreatePrivilegedUser allows administrators to provision operator and admin accounts.
+func (h *Handler) CreatePrivilegedUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req RegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "malformed request payload", http.StatusBadRequest)
+		return
+	}
+
+	if req.Username == "" || req.Password == "" {
+		http.Error(w, "username and password are required", http.StatusBadRequest)
+		return
+	}
+
+	role, err := ValidateRole(req.Role)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	user, err := h.store.CreateUser(r.Context(), req.Username, req.Password, role)
+	if err != nil {
+		if errors.Is(err, ErrUserAlreadyExists) {
+			http.Error(w, "user already exists", http.StatusConflict)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(AuthResponse{
+		UserID:   user.ID,
+		Username: user.Username,
+		Role:     user.Role,
 	})
 }

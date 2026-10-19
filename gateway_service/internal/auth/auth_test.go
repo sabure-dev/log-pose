@@ -193,3 +193,114 @@ func TestAuthMiddleware(t *testing.T) {
 		t.Fatalf("expected 200 and next called, got %d, nextCalled=%v", wValid.Code, nextCalled)
 	}
 }
+
+func TestAuthHandler_Register_PrivilegedRoleForbidden(t *testing.T) {
+	store := auth.NewMemoryUserStore()
+	tm := auth.NewTokenManager("handler-secret-key", 1*time.Hour)
+	h := auth.NewHandler(store, tm)
+
+	// 1. Attempting to self-register as warehouse_operator should return 403 Forbidden
+	operBody, _ := json.Marshal(auth.RegisterRequest{
+		Username: "rogue_operator",
+		Password: "password123",
+		Role:     "warehouse_operator",
+	})
+	reqOper := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(operBody))
+	wOper := httptest.NewRecorder()
+	h.Register(wOper, reqOper)
+
+	if wOper.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden when self-registering as warehouse_operator, got %d: %s", wOper.Code, wOper.Body.String())
+	}
+
+	// 2. Attempting to self-register as admin should return 403 Forbidden
+	adminBody, _ := json.Marshal(auth.RegisterRequest{
+		Username: "rogue_admin",
+		Password: "password123",
+		Role:     "admin",
+	})
+	reqAdmin := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(adminBody))
+	wAdmin := httptest.NewRecorder()
+	h.Register(wAdmin, reqAdmin)
+
+	if wAdmin.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden when self-registering as admin, got %d: %s", wAdmin.Code, wAdmin.Body.String())
+	}
+
+	// 3. Registering without role field defaults to customer (201 Created)
+	custBody, _ := json.Marshal(auth.RegisterRequest{
+		Username: "plain_customer",
+		Password: "password123",
+	})
+	reqCust := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(custBody))
+	wCust := httptest.NewRecorder()
+	h.Register(wCust, reqCust)
+
+	if wCust.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d: %s", wCust.Code, wCust.Body.String())
+	}
+	var resp auth.AuthResponse
+	_ = json.Unmarshal(wCust.Body.Bytes(), &resp)
+	if resp.Role != auth.RoleCustomer {
+		t.Fatalf("expected role customer, got %s", resp.Role)
+	}
+}
+
+func TestAuthHandler_CreatePrivilegedUser_And_RequireRole(t *testing.T) {
+	store := auth.NewMemoryUserStore()
+	tm := auth.NewTokenManager("handler-secret-key", 1*time.Hour)
+	h := auth.NewHandler(store, tm)
+
+	adminEndpoint := h.RequireRole(auth.RoleAdmin)(http.HandlerFunc(h.CreatePrivilegedUser))
+
+	newOperBody, _ := json.Marshal(auth.RegisterRequest{
+		Username: "provisioned_operator",
+		Password: "operatorpass123",
+		Role:     "warehouse_operator",
+	})
+
+	// 1. Unauthenticated request (no user in context) -> 401 Unauthorized
+	reqUnauth := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(newOperBody))
+	wUnauth := httptest.NewRecorder()
+	adminEndpoint.ServeHTTP(wUnauth, reqUnauth)
+	if wUnauth.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized, got %d", wUnauth.Code)
+	}
+
+	// 2. Customer user in context -> 403 Forbidden
+	customerClaims := &auth.Claims{
+		UserID:   uuid.New(),
+		Username: "some_customer",
+		Role:     auth.RoleCustomer,
+	}
+	reqCust := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(newOperBody))
+	reqCust = reqCust.WithContext(auth.ContextWithUser(reqCust.Context(), customerClaims))
+	wCust := httptest.NewRecorder()
+	adminEndpoint.ServeHTTP(wCust, reqCust)
+	if wCust.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for customer, got %d", wCust.Code)
+	}
+
+	// 3. Admin user in context -> 201 Created
+	adminClaims := &auth.Claims{
+		UserID:   uuid.New(),
+		Username: "superadmin",
+		Role:     auth.RoleAdmin,
+	}
+	reqAdmin := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(newOperBody))
+	reqAdmin = reqAdmin.WithContext(auth.ContextWithUser(reqAdmin.Context(), adminClaims))
+	wAdmin := httptest.NewRecorder()
+	adminEndpoint.ServeHTTP(wAdmin, reqAdmin)
+	if wAdmin.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created for admin provisioning, got %d: %s", wAdmin.Code, wAdmin.Body.String())
+	}
+
+	// Verify that the provisioned operator can authenticate
+	authOper, err := store.Authenticate(context.Background(), "provisioned_operator", "operatorpass123")
+	if err != nil {
+		t.Fatalf("failed to authenticate provisioned operator: %v", err)
+	}
+	if authOper.Role != auth.RoleWarehouseOperator {
+		t.Fatalf("expected role warehouse_operator, got %s", authOper.Role)
+	}
+}

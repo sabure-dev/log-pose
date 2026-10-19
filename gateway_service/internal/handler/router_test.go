@@ -189,6 +189,85 @@ func TestAuth_RegisterAndLoginFlow(t *testing.T) {
 	}
 }
 
+func TestAuth_RegisterPrivilegedRoleForbidden_ThroughRouter(t *testing.T) {
+	r, _, _ := setupTestRouter(t)
+
+	// Attempt to register as admin via public endpoint
+	payload := `{"username":"hacker","password":"password123","role":"admin"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden on privilege escalation attempt, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAdmin_ProvisionOperatorFlow_ThroughRouter(t *testing.T) {
+	r, tm, _ := setupTestRouter(t)
+
+	adminUser := &auth.User{
+		ID:       uuid.New(),
+		Username: "admin_user",
+		Role:     auth.RoleAdmin,
+	}
+	adminToken, _ := tm.GenerateToken(adminUser)
+
+	custUser := &auth.User{
+		ID:       uuid.New(),
+		Username: "cust_user",
+		Role:     auth.RoleCustomer,
+	}
+	custToken, _ := tm.GenerateToken(custUser)
+
+	newOperPayload := `{"username":"warehouse_lead","password":"leadpassword123","role":"warehouse_operator"}`
+
+	// 1. Unauthenticated -> 401
+	reqUnauth := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", strings.NewReader(newOperPayload))
+	reqUnauth.Header.Set("Content-Type", "application/json")
+	wUnauth := httptest.NewRecorder()
+	r.ServeHTTP(wUnauth, reqUnauth)
+	if wUnauth.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized, got %d", wUnauth.Code)
+	}
+
+	// 2. Customer token -> 403
+	reqCust := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", strings.NewReader(newOperPayload))
+	reqCust.Header.Set("Authorization", "Bearer "+custToken)
+	reqCust.Header.Set("Content-Type", "application/json")
+	wCust := httptest.NewRecorder()
+	r.ServeHTTP(wCust, reqCust)
+	if wCust.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for customer, got %d", wCust.Code)
+	}
+
+	// 3. Admin token -> 201 Created
+	reqAdmin := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", strings.NewReader(newOperPayload))
+	reqAdmin.Header.Set("Authorization", "Bearer "+adminToken)
+	reqAdmin.Header.Set("Content-Type", "application/json")
+	wAdmin := httptest.NewRecorder()
+	r.ServeHTTP(wAdmin, reqAdmin)
+	if wAdmin.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created for admin provisioning, got %d: %s", wAdmin.Code, wAdmin.Body.String())
+	}
+
+	// 4. Provisioned operator can login
+	loginPayload := `{"username":"warehouse_lead","password":"leadpassword123"}`
+	reqLogin := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginPayload))
+	reqLogin.Header.Set("Content-Type", "application/json")
+	wLogin := httptest.NewRecorder()
+	r.ServeHTTP(wLogin, reqLogin)
+	if wLogin.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for provisioned operator login, got %d", wLogin.Code)
+	}
+	var loginResp auth.AuthResponse
+	_ = json.Unmarshal(wLogin.Body.Bytes(), &loginResp)
+	if loginResp.Role != auth.RoleWarehouseOperator {
+		t.Fatalf("expected role warehouse_operator, got %s", loginResp.Role)
+	}
+}
+
 func TestOrdersProxy_UnauthorizedWithoutToken(t *testing.T) {
 	r, _, _ := setupTestRouter(t)
 
