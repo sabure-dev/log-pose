@@ -32,6 +32,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       ORDERS_DB_PASSWORD: ${ORDERS_DB_PASSWORD}
       INVENTORY_DB_PASSWORD: ${INVENTORY_DB_PASSWORD}
+      GATEWAY_DB_PASSWORD: ${GATEWAY_DB_PASSWORD:-gateway_password}
     volumes:
       - postgres_data:/var/lib/postgresql
       - ./infra/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
@@ -150,6 +151,8 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
+      postgres:
+        condition: service_healthy
       order_service:
         condition: service_healthy
       inventory_service:
@@ -158,6 +161,7 @@ services:
         condition: service_started
     environment:
       PORT: "8080"
+      DATABASE_URL: "postgres://gateway_user:${GATEWAY_DB_PASSWORD:-gateway_password}@postgres:5432/gateway_db?sslmode=disable"
       ORDER_SERVICE_URL: "http://order_service:8000"
       INVENTORY_GRPC_HOST: "inventory_service"
       INVENTORY_GRPC_PORT: "50051"

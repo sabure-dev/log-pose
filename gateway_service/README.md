@@ -6,9 +6,14 @@ High-performance Go 1.23 API Gateway serving as the single public perimeter ingr
 
 * **JWT Authentication & Role-Based Access Control:**
   * Public registration and login endpoints: `POST /api/v1/auth/register`, `POST /api/v1/auth/login`.
-  * Secure bcrypt password hashing and thread-safe user store.
+  * Persistent PostgreSQL user store (`PostgresUserStore`) using connection pooling with automatic schema initialization and demo user seeding.
+  * Graceful fallback to thread-safe in-memory store (`MemoryUserStore`) when `DATABASE_URL` is not provided (e.g., unit tests).
+  * Secure bcrypt password hashing and case-insensitive username uniqueness.
   * Signed JWT tokens containing claims: `user_id`, `username`, and `role` (`customer`, `warehouse_operator`, `admin`).
   * Pre-seeded demo operator accounts:
+    * `demo_customer` / `demo_password` (`customer`)
+    * `demo_operator` / `demo_password` (`warehouse_operator`)
+    * `demo_admin` / `demo_password` (`admin`)
     * `operator` / `operatorpass123` (`warehouse_operator`)
     * `admin` / `adminpass123` (`admin`)
 * **Perimeter Security & Header Sanitization:**
@@ -37,6 +42,7 @@ High-performance Go 1.23 API Gateway serving as the single public perimeter ingr
 | Variable | Description | Default |
 | :--- | :--- | :--- |
 | `PORT` | HTTP port for API Gateway | `8080` |
+| `DATABASE_URL` | PostgreSQL connection string for persistent user store | *None (falls back to in-memory)* |
 | `ORDER_SERVICE_URL` | Base URL of internal order_service | `http://localhost:8000` |
 | `INVENTORY_GRPC_HOST` | Hostname of inventory gRPC service | `localhost` |
 | `INVENTORY_GRPC_PORT` | Port of inventory gRPC service | `50051` |

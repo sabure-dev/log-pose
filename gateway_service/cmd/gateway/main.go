@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"gateway_service/internal/auth"
 	"gateway_service/internal/config"
 	"gateway_service/internal/handler"
@@ -50,8 +52,40 @@ func run() error {
 		defer shutdownTracer(context.Background())
 	}
 
-	// 1. Initialize Auth module
-	userStore := auth.NewMemoryUserStore()
+	// 1. Initialize Auth module (PostgreSQL if DATABASE_URL provided, else in-memory)
+	var userStore auth.UserStore
+	if cfg.DatabaseURL != "" {
+		slog.Info("Connecting to PostgreSQL for Gateway user storage...")
+		poolConfig, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+		if err != nil {
+			return fmt.Errorf("failed to parse database URL: %w", err)
+		}
+		poolConfig.MaxConns = 10
+		poolConfig.MinConns = 2
+		poolConfig.MaxConnLifetime = 1 * time.Hour
+		poolConfig.MaxConnIdleTime = 30 * time.Minute
+
+		pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+		if err != nil {
+			return fmt.Errorf("failed to connect to postgres: %w", err)
+		}
+		defer pool.Close()
+
+		if err := pool.Ping(ctx); err != nil {
+			return fmt.Errorf("failed to ping postgres: %w", err)
+		}
+
+		pgStore, err := auth.NewPostgresUserStore(ctx, pool)
+		if err != nil {
+			return fmt.Errorf("failed to initialize postgres user store: %w", err)
+		}
+		userStore = pgStore
+		slog.Info("PostgreSQL user store initialized successfully")
+	} else {
+		slog.Info("DATABASE_URL not configured; falling back to in-memory user store")
+		userStore = auth.NewMemoryUserStore()
+	}
+
 	tokenManager := auth.NewTokenManager(cfg.JWTSecret, 24*time.Hour)
 	authHandler := auth.NewHandler(userStore, tokenManager)
 

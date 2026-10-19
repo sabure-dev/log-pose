@@ -30,6 +30,8 @@ func NewMemoryUserStore() *MemoryUserStore {
 	_, _ = store.CreateUser(context.Background(), "demo_customer", "demo_password", RoleCustomer)
 	_, _ = store.CreateUser(context.Background(), "demo_operator", "demo_password", RoleWarehouseOperator)
 	_, _ = store.CreateUser(context.Background(), "demo_admin", "demo_password", RoleAdmin)
+	_, _ = store.CreateUser(context.Background(), "operator", "operatorpass123", RoleWarehouseOperator)
+	_, _ = store.CreateUser(context.Background(), "admin", "adminpass123", RoleAdmin)
 	return store
 }
 
