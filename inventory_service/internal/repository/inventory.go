@@ -513,6 +513,7 @@ func (r *InventoryRepository) CheckStockAvailability(ctx context.Context, items 
 	overallEligible := true
 	var firstFailedStatus int32
 	var firstFailedReason string
+	seenProducts := make(map[uuid.UUID]struct{}, len(items))
 
 	for _, item := range items {
 		res := domain.StockItemCheckResult{
@@ -522,47 +523,48 @@ func (r *InventoryRepository) CheckStockAvailability(ctx context.Context, items 
 		if item.ProductID == uuid.Nil {
 			res.StatusCode = 2 // AVAILABILITY_STATUS_PRODUCT_NOT_FOUND
 			res.Reason = "invalid product id"
+		} else if _, seen := seenProducts[item.ProductID]; seen {
+			res.StatusCode = 5 // AVAILABILITY_STATUS_INVALID_QUANTITY
+			res.Reason = "duplicate product_id in request"
 		} else if item.Quantity <= 0 {
 			res.StatusCode = 5 // AVAILABILITY_STATUS_INVALID_QUANTITY
 			res.Reason = "quantity must be greater than zero"
 		} else {
-			var (
-				catalogPrice string
-				available    int
-			)
-			err := r.pool.QueryRow(ctx, `
-				SELECT p.price::text, COALESCE(s.available, 0)
-				FROM products p
-				LEFT JOIN inventory_stocks s ON p.id = s.product_id
-				WHERE p.id = $1
-			`, item.ProductID).Scan(&catalogPrice, &available)
-			if err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					res.StatusCode = 2 // AVAILABILITY_STATUS_PRODUCT_NOT_FOUND
-					res.Reason = "product not found in catalog"
-				} else {
-					return nil, fmt.Errorf("failed to query product %s: %w", item.ProductID, err)
-				}
+			seenProducts[item.ProductID] = struct{}{}
+			if item.ExpectedPrice != "" && !isValidPositiveDecimalPrice(item.ExpectedPrice) {
+				res.StatusCode = 3 // AVAILABILITY_STATUS_PRICE_MISMATCH
+				res.Reason = "invalid expected price format"
 			} else {
-				res.CatalogPrice = catalogPrice
-				res.AvailableStock = available
-
+				var (
+					catalogPrice  string
+					available     int
+					priceMatches  bool
+					expectedParam any
+				)
 				if item.ExpectedPrice != "" {
-					if !isValidPositiveDecimalPrice(item.ExpectedPrice) {
-						res.StatusCode = 3 // AVAILABILITY_STATUS_PRICE_MISMATCH
-						res.Reason = "invalid expected price format"
-					} else {
-						var priceMatches bool
-						err := r.pool.QueryRow(ctx, "SELECT price = $1::numeric FROM products WHERE id = $2", item.ExpectedPrice, item.ProductID).Scan(&priceMatches)
-						if err != nil || !priceMatches {
-							res.StatusCode = 3 // AVAILABILITY_STATUS_PRICE_MISMATCH
-							res.Reason = fmt.Sprintf("expected price %s does not match catalog price %s", item.ExpectedPrice, catalogPrice)
-						}
-					}
+					expectedParam = item.ExpectedPrice
 				}
+				err := r.pool.QueryRow(ctx, `
+					SELECT p.price::text, COALESCE(s.available, 0), ($2::numeric IS NULL OR p.price = $2::numeric)
+					FROM products p
+					LEFT JOIN inventory_stocks s ON p.id = s.product_id
+					WHERE p.id = $1
+				`, item.ProductID, expectedParam).Scan(&catalogPrice, &available, &priceMatches)
+				if err != nil {
+					if errors.Is(err, pgx.ErrNoRows) {
+						res.StatusCode = 2 // AVAILABILITY_STATUS_PRODUCT_NOT_FOUND
+						res.Reason = "product not found in catalog"
+					} else {
+						return nil, fmt.Errorf("failed to query product %s: %w", item.ProductID, err)
+					}
+				} else {
+					res.CatalogPrice = catalogPrice
+					res.AvailableStock = available
 
-				if res.StatusCode == 0 {
-					if available < item.Quantity {
+					if !priceMatches {
+						res.StatusCode = 3 // AVAILABILITY_STATUS_PRICE_MISMATCH
+						res.Reason = fmt.Sprintf("expected price %s does not match catalog price %s", item.ExpectedPrice, catalogPrice)
+					} else if available < item.Quantity {
 						res.StatusCode = 4 // AVAILABILITY_STATUS_INSUFFICIENT_STOCK
 						res.Reason = fmt.Sprintf("insufficient stock: requested %d, available %d", item.Quantity, available)
 					} else {
