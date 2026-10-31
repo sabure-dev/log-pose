@@ -72,11 +72,29 @@ func InitTracer(ctx context.Context, serviceName, endpoint string) (func(context
 	return tp.Shutdown, nil
 }
 
+type correlationIDKey struct{}
+
+// ContextWithCorrelationID attaches a correlation ID to context.
+func ContextWithCorrelationID(ctx context.Context, correlationID string) context.Context {
+	return context.WithValue(ctx, correlationIDKey{}, correlationID)
+}
+
+// CorrelationIDFromContext retrieves correlation ID from context.
+func CorrelationIDFromContext(ctx context.Context) string {
+	if val, ok := ctx.Value(correlationIDKey{}).(string); ok {
+		return val
+	}
+	return ""
+}
+
 // InjectGRPCMetadata injects traceparent and other W3C context into outgoing gRPC metadata.
 func InjectGRPCMetadata(ctx context.Context) context.Context {
 	md, ok := metadata.FromOutgoingContext(ctx)
 	if !ok {
 		md = metadata.New(nil)
+	}
+	if corrID := CorrelationIDFromContext(ctx); corrID != "" {
+		md.Set("x-correlation-id", corrID)
 	}
 	carrier := metadataCarrier{md: md}
 	otel.GetTextMapPropagator().Inject(ctx, carrier)

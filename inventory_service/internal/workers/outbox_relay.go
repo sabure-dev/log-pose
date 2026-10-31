@@ -2,9 +2,12 @@ package workers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -314,6 +317,27 @@ func (r *OutboxRelay) publishSingle(ctx context.Context, id uuid.UUID, topic str
 	r.drainReturns()
 
 	headers := telemetry.InjectAMQPHeaders(ctx, make(amqp.Table))
+	var meta struct {
+		Traceparent   string `json:"traceparent"`
+		CorrelationID string `json:"correlation_id"`
+	}
+	if err := json.Unmarshal(payload, &meta); err == nil {
+		traceparent := meta.Traceparent
+		if traceparent == "" && meta.CorrelationID != "" {
+			cleanCorr := strings.ReplaceAll(meta.CorrelationID, "-", "")
+			if len(cleanCorr) == 32 && cleanCorr != "00000000000000000000000000000000" {
+				spanID := fmt.Sprintf("%016x", rand.Uint64())
+				traceparent = fmt.Sprintf("00-%s-%s-01", strings.ToLower(cleanCorr), spanID)
+			}
+		}
+		if traceparent != "" {
+			headers["traceparent"] = traceparent
+		}
+		if meta.CorrelationID != "" {
+			headers["x-correlation-id"] = meta.CorrelationID
+		}
+	}
+
 	dc, err := r.publishFn(
 		ctx,
 		"logpose_events",

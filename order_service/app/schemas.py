@@ -64,6 +64,7 @@ class OrderRead(BaseModel):
 class InventoryResultPayload(BaseModel):
     event_id: uuid.UUID | None = None
     correlation_id: str | None = None
+    traceparent: str | None = None
     event_type: str | None = None
     order_id: uuid.UUID
     status: Literal["RESERVED", "FAILED"]

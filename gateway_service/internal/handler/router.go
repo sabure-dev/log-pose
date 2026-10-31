@@ -16,6 +16,7 @@ import (
 	"gateway_service/internal/inventory"
 	"gateway_service/internal/proxy"
 	"gateway_service/internal/telemetry"
+	"github.com/google/uuid"
 )
 
 type RouterConfig struct {
@@ -26,7 +27,17 @@ type RouterConfig struct {
 
 func LoggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqID := r.Header.Get("X-Request-Id")
+		if reqID == "" {
+			reqID = r.Header.Get("X-Correlation-Id")
+		}
+		if reqID == "" {
+			reqID = uuid.New().String()
+		}
+		w.Header().Set("X-Request-Id", reqID)
+
 		ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+		ctx = telemetry.ContextWithCorrelationID(ctx, reqID)
 		tracer := telemetry.Tracer("gateway-service")
 		ctx, span := tracer.Start(ctx, fmt.Sprintf("%s %s", r.Method, r.URL.Path))
 		defer span.End()
@@ -41,6 +52,7 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 			attribute.Int("http.status_code", rw.statusCode),
 			attribute.String("http.method", r.Method),
 			attribute.String("http.target", r.URL.Path),
+			attribute.String("http.request_id", reqID),
 		)
 
 		slog.Info("HTTP request",
@@ -49,6 +61,7 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 			"status", rw.statusCode,
 			"duration", duration,
 			"remote", r.RemoteAddr,
+			"request_id", reqID,
 			"trace_id", span.SpanContext().TraceID().String(),
 		)
 	})
@@ -69,6 +82,7 @@ func CORSMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Correlation-Id, X-Request-Id, traceparent, Idempotency-Key")
+		w.Header().Set("Access-Control-Expose-Headers", "X-Request-Id, X-Correlation-Id")
 		w.Header().Set("Access-Control-Max-Age", "86400")
 
 		if r.Method == http.MethodOptions {

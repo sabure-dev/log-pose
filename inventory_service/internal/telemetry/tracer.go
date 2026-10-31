@@ -162,3 +162,12 @@ func (c amqpTableCarrier) Keys() []string {
 func Tracer(name string) trace.Tracer {
 	return otel.GetTracerProvider().Tracer(name)
 }
+
+// GetTraceparent returns a W3C traceparent string if the context has a valid span.
+func GetTraceparent(ctx context.Context) string {
+	spanCtx := trace.SpanFromContext(ctx).SpanContext()
+	if !spanCtx.IsValid() {
+		return ""
+	}
+	return fmt.Sprintf("00-%s-%s-%s", spanCtx.TraceID().String(), spanCtx.SpanID().String(), spanCtx.TraceFlags().String())
+}
