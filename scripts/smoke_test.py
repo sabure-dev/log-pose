@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 
+import json
 import sys
 import time
-import uuid
-import urllib.request
 import urllib.error
-import json
+import urllib.request
+import uuid
 
 GATEWAY_URL = "http://localhost:8080"
 
