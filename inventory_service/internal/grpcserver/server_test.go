@@ -56,7 +56,6 @@ func setupTestGRPCServer(t *testing.T, querier repository.StockQuerier) (pb.Inve
 
 	go func() {
 		if err := s.Serve(lis); err != nil && err != grpc.ErrServerStopped {
-			// ignore stopped error
 		}
 	}()
 

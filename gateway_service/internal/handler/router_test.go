@@ -158,7 +158,6 @@ func TestCORS_PreflightOptions(t *testing.T) {
 func TestAuth_RegisterAndLoginFlow(t *testing.T) {
 	r, _, _ := setupTestRouter(t)
 
-	// Register customer
 	regPayload := `{"username":"newcustomer","password":"secretpassword","role":"customer"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", strings.NewReader(regPayload))
 	req.Header.Set("Content-Type", "application/json")
@@ -177,7 +176,6 @@ func TestAuth_RegisterAndLoginFlow(t *testing.T) {
 		t.Fatalf("unexpected auth response: %+v", authResp)
 	}
 
-	// Login with correct credentials
 	loginPayload := `{"username":"newcustomer","password":"secretpassword"}`
 	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginPayload))
 	loginReq.Header.Set("Content-Type", "application/json")
@@ -192,7 +190,6 @@ func TestAuth_RegisterAndLoginFlow(t *testing.T) {
 func TestAuth_RegisterPrivilegedRoleForbidden_ThroughRouter(t *testing.T) {
 	r, _, _ := setupTestRouter(t)
 
-	// Attempt to register as admin via public endpoint
 	payload := `{"username":"hacker","password":"password123","role":"admin"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", strings.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
@@ -223,7 +220,6 @@ func TestAdmin_ProvisionOperatorFlow_ThroughRouter(t *testing.T) {
 
 	newOperPayload := `{"username":"warehouse_lead","password":"leadpassword123","role":"warehouse_operator"}`
 
-	// 1. Unauthenticated -> 401
 	reqUnauth := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", strings.NewReader(newOperPayload))
 	reqUnauth.Header.Set("Content-Type", "application/json")
 	wUnauth := httptest.NewRecorder()
@@ -232,7 +228,6 @@ func TestAdmin_ProvisionOperatorFlow_ThroughRouter(t *testing.T) {
 		t.Fatalf("expected 401 Unauthorized, got %d", wUnauth.Code)
 	}
 
-	// 2. Customer token -> 403
 	reqCust := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", strings.NewReader(newOperPayload))
 	reqCust.Header.Set("Authorization", "Bearer "+custToken)
 	reqCust.Header.Set("Content-Type", "application/json")
@@ -242,7 +237,6 @@ func TestAdmin_ProvisionOperatorFlow_ThroughRouter(t *testing.T) {
 		t.Fatalf("expected 403 Forbidden for customer, got %d", wCust.Code)
 	}
 
-	// 3. Admin token -> 201 Created
 	reqAdmin := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", strings.NewReader(newOperPayload))
 	reqAdmin.Header.Set("Authorization", "Bearer "+adminToken)
 	reqAdmin.Header.Set("Content-Type", "application/json")
@@ -252,7 +246,6 @@ func TestAdmin_ProvisionOperatorFlow_ThroughRouter(t *testing.T) {
 		t.Fatalf("expected 201 Created for admin provisioning, got %d: %s", wAdmin.Code, wAdmin.Body.String())
 	}
 
-	// 4. Provisioned operator can login
 	loginPayload := `{"username":"warehouse_lead","password":"leadpassword123"}`
 	reqLogin := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(loginPayload))
 	reqLogin.Header.Set("Content-Type", "application/json")
@@ -296,7 +289,6 @@ func TestOrdersProxy_CustomerToken_InjectsUserId_StripsClientHeaders(t *testing.
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/orders/", bytes.NewReader([]byte(`{"items":[]}`)))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	// Spoofed client headers that MUST be stripped
 	req.Header.Set("X-User-Id", uuid.New().String())
 	req.Header.Set("X-User-Role", "admin")
 	req.Header.Set("X-Internal-Token", "fake-token")
@@ -312,23 +304,19 @@ func TestOrdersProxy_CustomerToken_InjectsUserId_StripsClientHeaders(t *testing.
 		t.Fatalf("expected request to reach fake transport")
 	}
 
-	// Verify path rewritten
 	if transport.captured.Path != "/orders/" {
 		t.Fatalf("expected rewritten path /orders/, got %s", transport.captured.Path)
 	}
 
-	// Verify X-User-Id matches the verified JWT user, not spoofed
 	if transport.captured.Header.Get("X-User-Id") != custUser.ID.String() {
 		t.Fatalf("expected X-User-Id=%s, got %s", custUser.ID, transport.captured.Header.Get("X-User-Id"))
 	}
 	if transport.captured.Header.Get("X-User-Role") != "customer" {
 		t.Fatalf("expected X-User-Role=customer, got %s", transport.captured.Header.Get("X-User-Role"))
 	}
-	// For customer role, X-Internal-Token must NOT be present
 	if transport.captured.Header.Get("X-Internal-Token") != "" {
 		t.Fatalf("expected no X-Internal-Token for customer, got %s", transport.captured.Header.Get("X-Internal-Token"))
 	}
-	// Traceparent must be present
 	if transport.captured.Header.Get("traceparent") == "" {
 		t.Fatalf("expected traceparent header injected")
 	}
@@ -383,7 +371,6 @@ func TestInventoryCatalog_PublicEndpoint(t *testing.T) {
 func TestDocumentation_OpenAPIAndSwagger(t *testing.T) {
 	r, _, _ := setupTestRouter(t)
 
-	// Test OpenAPI JSON
 	reqJSON := httptest.NewRequest(http.MethodGet, "/api/v1/openapi.json", nil)
 	wJSON := httptest.NewRecorder()
 	r.ServeHTTP(wJSON, reqJSON)
@@ -398,7 +385,6 @@ func TestDocumentation_OpenAPIAndSwagger(t *testing.T) {
 		t.Fatalf("unexpected Content-Type: %s", wJSON.Header().Get("Content-Type"))
 	}
 
-	// Test Swagger UI HTML
 	reqHTML := httptest.NewRequest(http.MethodGet, "/docs", nil)
 	wHTML := httptest.NewRecorder()
 	r.ServeHTTP(wHTML, reqHTML)

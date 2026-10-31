@@ -97,7 +97,6 @@ func CORSMiddleware(next http.Handler) http.Handler {
 func NewRouter(cfg *RouterConfig) http.Handler {
 	mux := http.NewServeMux()
 
-	// 1. Healthcheck
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -109,17 +108,14 @@ func NewRouter(cfg *RouterConfig) http.Handler {
 		_, _ = w.Write([]byte(`{"status":"ok","service":"gateway_service"}`))
 	})
 
-	// 2. Auth Endpoints (Public)
 	mux.HandleFunc("POST /api/v1/auth/register", cfg.AuthHandler.Register)
 	mux.HandleFunc("POST /api/v1/auth/login", cfg.AuthHandler.Login)
 
-	// Admin-only User Provisioning
 	adminUserHandler := cfg.AuthHandler.AuthMiddleware(
 		cfg.AuthHandler.RequireRole(auth.RoleAdmin)(http.HandlerFunc(cfg.AuthHandler.CreatePrivilegedUser)),
 	)
 	mux.Handle("POST /api/v1/admin/users", adminUserHandler)
 
-	// 3. Inventory Endpoints (Public or Authenticated catalog browsing)
 	mux.HandleFunc("GET /api/v1/inventory/products", cfg.InventoryHandler.ListProducts)
 	mux.HandleFunc("POST /api/v1/inventory/check", cfg.InventoryHandler.CheckStockAvailability)
 	mux.HandleFunc("GET /api/v1/inventory/products/", func(w http.ResponseWriter, r *http.Request) {
@@ -130,13 +126,10 @@ func NewRouter(cfg *RouterConfig) http.Handler {
 		}
 	})
 
-	// 4. Orders Reverse Proxy (Strictly Authenticated)
-	// Wraps orders proxy with JWT AuthMiddleware
 	protectedOrdersProxy := cfg.AuthHandler.AuthMiddleware(cfg.OrdersProxy)
 	mux.Handle("/api/v1/orders/", protectedOrdersProxy)
 	mux.Handle("/api/v1/orders", protectedOrdersProxy)
 
-	// 5. Documentation (OpenAPI specification & interactive Swagger UI)
 	mux.HandleFunc("GET /openapi.json", docs.OpenAPIJSONHandler)
 	mux.HandleFunc("GET /api/v1/openapi.json", docs.OpenAPIJSONHandler)
 	mux.HandleFunc("GET /docs", docs.SwaggerUIHandler)

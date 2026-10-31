@@ -178,7 +178,6 @@ func (r *InventoryRepository) Reserve(ctx context.Context, event domain.OrderCre
 		return bytes.Compare(a.ProductID[:], b.ProductID[:])
 	})
 
-	// Wrap stock updates in a savepoint so partial deductions are rolled back if a subsequent item is out of stock.
 	sp, err := tx.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin stock savepoint: %w", err)

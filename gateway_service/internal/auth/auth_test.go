@@ -17,7 +17,6 @@ func TestUserStore_CreateAndAuthenticate(t *testing.T) {
 	store := auth.NewMemoryUserStore()
 	ctx := context.Background()
 
-	// 1. Create customer user
 	user, err := store.CreateUser(ctx, "alice", "securepass123", auth.RoleCustomer)
 	if err != nil {
 		t.Fatalf("unexpected error creating user: %v", err)
@@ -26,13 +25,11 @@ func TestUserStore_CreateAndAuthenticate(t *testing.T) {
 		t.Fatalf("unexpected user fields: %+v", user)
 	}
 
-	// 2. Reject duplicate username
 	_, err = store.CreateUser(ctx, "Alice", "anotherpass", auth.RoleCustomer)
 	if err != auth.ErrUserAlreadyExists {
 		t.Fatalf("expected ErrUserAlreadyExists, got %v", err)
 	}
 
-	// 3. Authenticate success
 	authed, err := store.Authenticate(ctx, "alice", "securepass123")
 	if err != nil {
 		t.Fatalf("failed to authenticate: %v", err)
@@ -41,13 +38,11 @@ func TestUserStore_CreateAndAuthenticate(t *testing.T) {
 		t.Fatalf("expected ID %s, got %s", user.ID, authed.ID)
 	}
 
-	// 4. Authenticate bad password
 	_, err = store.Authenticate(ctx, "alice", "wrongpassword")
 	if err != auth.ErrInvalidCredentials {
 		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
 	}
 
-	// 5. Authenticate nonexistent user
 	_, err = store.Authenticate(ctx, "nonexistent", "pass")
 	if err != auth.ErrInvalidCredentials {
 		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
@@ -75,7 +70,6 @@ func TestTokenManager_Lifecycle(t *testing.T) {
 		t.Fatalf("claims mismatch: %+v", claims)
 	}
 
-	// Expired token test
 	shortTM := auth.NewTokenManager("test-secret-key-123", -1*time.Minute)
 	expiredToken, err := shortTM.GenerateToken(user)
 	if err != nil {
@@ -86,7 +80,6 @@ func TestTokenManager_Lifecycle(t *testing.T) {
 		t.Fatalf("expected ErrInvalidToken for expired token, got %v", err)
 	}
 
-	// Tampered token test
 	_, err = tm.VerifyToken(tokenStr + "corrupted")
 	if err != auth.ErrInvalidToken {
 		t.Fatalf("expected ErrInvalidToken for corrupted token, got %v", err)
@@ -98,7 +91,6 @@ func TestAuthHandler_RegisterAndLogin(t *testing.T) {
 	tm := auth.NewTokenManager("handler-secret-key", 1*time.Hour)
 	h := auth.NewHandler(store, tm)
 
-	// Register
 	regBody, _ := json.Marshal(auth.RegisterRequest{
 		Username: "newuser",
 		Password: "password123",
@@ -119,7 +111,6 @@ func TestAuthHandler_RegisterAndLogin(t *testing.T) {
 		t.Fatalf("invalid register response: %+v", regResp)
 	}
 
-	// Login
 	loginBody, _ := json.Marshal(auth.LoginRequest{
 		Username: "newuser",
 		Password: "password123",
@@ -167,7 +158,6 @@ func TestAuthMiddleware(t *testing.T) {
 
 	wrapped := h.AuthMiddleware(testHandler)
 
-	// 1. Missing Authorization header
 	reqNoAuth := httptest.NewRequest(http.MethodGet, "/test", nil)
 	wNoAuth := httptest.NewRecorder()
 	wrapped.ServeHTTP(wNoAuth, reqNoAuth)
@@ -175,7 +165,6 @@ func TestAuthMiddleware(t *testing.T) {
 		t.Fatalf("expected 401 for missing auth header, got %d", wNoAuth.Code)
 	}
 
-	// 2. Invalid Bearer format
 	reqBadFormat := httptest.NewRequest(http.MethodGet, "/test", nil)
 	reqBadFormat.Header.Set("Authorization", "Basic invalid")
 	wBadFormat := httptest.NewRecorder()
@@ -184,7 +173,6 @@ func TestAuthMiddleware(t *testing.T) {
 		t.Fatalf("expected 401 for bad auth format, got %d", wBadFormat.Code)
 	}
 
-	// 3. Valid Bearer Token
 	reqValid := httptest.NewRequest(http.MethodGet, "/test", nil)
 	reqValid.Header.Set("Authorization", "Bearer "+validToken)
 	wValid := httptest.NewRecorder()
@@ -199,7 +187,6 @@ func TestAuthHandler_Register_PrivilegedRoleForbidden(t *testing.T) {
 	tm := auth.NewTokenManager("handler-secret-key", 1*time.Hour)
 	h := auth.NewHandler(store, tm)
 
-	// 1. Attempting to self-register as warehouse_operator should return 403 Forbidden
 	operBody, _ := json.Marshal(auth.RegisterRequest{
 		Username: "rogue_operator",
 		Password: "password123",
@@ -213,7 +200,6 @@ func TestAuthHandler_Register_PrivilegedRoleForbidden(t *testing.T) {
 		t.Fatalf("expected 403 Forbidden when self-registering as warehouse_operator, got %d: %s", wOper.Code, wOper.Body.String())
 	}
 
-	// 2. Attempting to self-register as admin should return 403 Forbidden
 	adminBody, _ := json.Marshal(auth.RegisterRequest{
 		Username: "rogue_admin",
 		Password: "password123",
@@ -227,7 +213,6 @@ func TestAuthHandler_Register_PrivilegedRoleForbidden(t *testing.T) {
 		t.Fatalf("expected 403 Forbidden when self-registering as admin, got %d: %s", wAdmin.Code, wAdmin.Body.String())
 	}
 
-	// 3. Registering without role field defaults to customer (201 Created)
 	custBody, _ := json.Marshal(auth.RegisterRequest{
 		Username: "plain_customer",
 		Password: "password123",
@@ -259,7 +244,6 @@ func TestAuthHandler_CreatePrivilegedUser_And_RequireRole(t *testing.T) {
 		Role:     "warehouse_operator",
 	})
 
-	// 1. Unauthenticated request (no user in context) -> 401 Unauthorized
 	reqUnauth := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", bytes.NewReader(newOperBody))
 	wUnauth := httptest.NewRecorder()
 	adminEndpoint.ServeHTTP(wUnauth, reqUnauth)
@@ -267,7 +251,6 @@ func TestAuthHandler_CreatePrivilegedUser_And_RequireRole(t *testing.T) {
 		t.Fatalf("expected 401 Unauthorized, got %d", wUnauth.Code)
 	}
 
-	// 2. Customer user in context -> 403 Forbidden
 	customerClaims := &auth.Claims{
 		UserID:   uuid.New(),
 		Username: "some_customer",
@@ -281,7 +264,6 @@ func TestAuthHandler_CreatePrivilegedUser_And_RequireRole(t *testing.T) {
 		t.Fatalf("expected 403 Forbidden for customer, got %d", wCust.Code)
 	}
 
-	// 3. Admin user in context -> 201 Created
 	adminClaims := &auth.Claims{
 		UserID:   uuid.New(),
 		Username: "superadmin",
@@ -295,7 +277,6 @@ func TestAuthHandler_CreatePrivilegedUser_And_RequireRole(t *testing.T) {
 		t.Fatalf("expected 201 Created for admin provisioning, got %d: %s", wAdmin.Code, wAdmin.Body.String())
 	}
 
-	// Verify that the provisioned operator can authenticate
 	authOper, err := store.Authenticate(context.Background(), "provisioned_operator", "operatorpass123")
 	if err != nil {
 		t.Fatalf("failed to authenticate provisioned operator: %v", err)

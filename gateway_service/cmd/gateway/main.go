@@ -44,7 +44,6 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Initialize OpenTelemetry tracer
 	shutdownTracer, err := telemetry.InitTracer(ctx, "gateway-service", cfg.OTLPEndpoint)
 	if err != nil {
 		slog.Warn("Failed to initialize OpenTelemetry", "error", err)
@@ -52,7 +51,6 @@ func run() error {
 		defer shutdownTracer(context.Background())
 	}
 
-	// 1. Initialize Auth module (PostgreSQL if DATABASE_URL provided, else in-memory)
 	var userStore auth.UserStore
 	if cfg.DatabaseURL != "" {
 		slog.Info("Connecting to PostgreSQL for Gateway user storage...")
@@ -89,7 +87,6 @@ func run() error {
 	tokenManager := auth.NewTokenManager(cfg.JWTSecret, 24*time.Hour)
 	authHandler := auth.NewHandler(userStore, tokenManager)
 
-	// 2. Initialize Inventory gRPC client
 	invTarget := fmt.Sprintf("%s:%s", cfg.InventoryGRPCHost, cfg.InventoryGRPCPort)
 	invClient, err := inventory.NewClient(invTarget)
 	if err != nil {
@@ -98,13 +95,11 @@ func run() error {
 	defer invClient.Close()
 	invHandler := inventory.NewHandler(invClient)
 
-	// 3. Initialize Orders Reverse Proxy
 	ordersProxy, err := proxy.NewOrdersProxy(cfg.OrderServiceURL, cfg.InternalAPIToken)
 	if err != nil {
 		return fmt.Errorf("failed to create orders reverse proxy: %w", err)
 	}
 
-	// 4. Build HTTP Router
 	appRouter := handler.NewRouter(&handler.RouterConfig{
 		AuthHandler:      authHandler,
 		InventoryHandler: invHandler,

@@ -159,13 +159,10 @@ async def test_order_service_preflight_idempotent_replay_does_not_call_inventory
     )
     assert client.called is True
 
-    # Reset client flag and change status to unavailable/false
     client.called = False
     client.eligible = False
     client.status = "INSUFFICIENT_STOCK"
 
-    # Second call with same idempotency key must return existing
-    # without calling inventory
     order2 = await service.create_new_order(
         user_id=user_id, items=items, idempotency_key="key-123"
     )

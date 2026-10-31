@@ -36,8 +36,6 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Public self-registration is strictly restricted to regular customers.
-	// Attempting to self-assign privileged roles (operator/admin) returns 403 Forbidden.
 	cleanRole := strings.ToLower(strings.TrimSpace(req.Role))
 	if cleanRole != "" && Role(cleanRole) != RoleCustomer {
 		http.Error(w, "self-registration with privileged roles is forbidden", http.StatusForbidden)
@@ -104,7 +102,6 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// AuthMiddleware validates the JWT bearer token and injects verified claims into context.
 func (h *Handler) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
@@ -130,7 +127,6 @@ func (h *Handler) AuthMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// RequireRole returns a middleware verifying that the authenticated user has one of the allowed roles.
 func (h *Handler) RequireRole(allowedRoles ...Role) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -150,7 +146,6 @@ func (h *Handler) RequireRole(allowedRoles ...Role) func(http.Handler) http.Hand
 	}
 }
 
-// CreatePrivilegedUser allows administrators to provision operator and admin accounts.
 func (h *Handler) CreatePrivilegedUser(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

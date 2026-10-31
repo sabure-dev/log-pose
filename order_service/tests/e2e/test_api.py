@@ -101,7 +101,6 @@ async def test_create_order_idempotency_key_and_conflict(
     result = await db_session.execute(text("SELECT * FROM outbox_events"))
     assert len(result.mappings().all()) == 1
 
-    # Reusing same Idempotency-Key with different payload must return 409 Conflict
     conflicting_payload = {
         "items": [
             {
@@ -117,8 +116,6 @@ async def test_create_order_idempotency_key_and_conflict(
     )
     assert resp_conflict.status_code == 409
 
-    # Two requests with empty Idempotency-Key:
-    # "" must be normalized to None and create 2 distinct orders without 500
     empty_key_headers = {"X-User-Id": user_id, "Idempotency-Key": "   "}
     resp_empty1 = await async_client.post(
         "/orders/", json=payload, headers=empty_key_headers
@@ -258,13 +255,11 @@ async def test_ship_and_complete_order_endpoints_require_operator_auth(
     )
     order_id = uuid.UUID(create_resp.json()["id"])
 
-    # Regular customer without X-Internal-Token gets 403 Forbidden
     forbidden_ship = await async_client.post(
         f"/orders/{order_id}/ship", headers={"X-User-Id": user_id}
     )
     assert forbidden_ship.status_code == 403
 
-    # Spoofed X-User-Role without valid X-Internal-Token gets 403 Forbidden
     spoofed_role = await async_client.post(
         f"/orders/{order_id}/ship", headers={"X-User-Role": "warehouse"}
     )
@@ -275,11 +270,9 @@ async def test_ship_and_complete_order_endpoints_require_operator_auth(
         "X-Internal-Token": settings.internal_api_token,
     }
 
-    # Cannot ship while still PENDING
     ship_early = await async_client.post(f"/orders/{order_id}/ship", headers=op_headers)
     assert ship_early.status_code == 409
 
-    # Transition to RESERVED (simulating inventory.reserved consumer)
     uow = SqlAlchemyUnitOfWork(session=db_session)
     service = OrderService(uow=uow)
     await service.update_order_status(order_id, OrderStatus.RESERVED)
@@ -288,7 +281,6 @@ async def test_ship_and_complete_order_endpoints_require_operator_auth(
     assert ship_resp.status_code == 200
     assert ship_resp.json()["status"] == OrderStatus.READY_FOR_SHIPPING.value
 
-    # Customer cannot cancel an order once it is in READY_FOR_SHIPPING
     cancel_after_ship = await async_client.post(
         f"/orders/{order_id}/cancel", headers={"X-User-Id": user_id}
     )
@@ -353,14 +345,12 @@ async def test_emitted_outbox_payloads_match_contract_schemas(
     )
     order_id = uuid.UUID(resp.json()["id"])
 
-    # Transition to RESERVED -> READY_FOR_SHIPPING -> COMPLETED
     uow = SqlAlchemyUnitOfWork(session=db_session)
     service = OrderService(uow=uow)
     await service.update_order_status(order_id, OrderStatus.RESERVED)
     await async_client.post(f"/orders/{order_id}/ship", headers=op_headers)
     await async_client.post(f"/orders/{order_id}/complete", headers=op_headers)
 
-    # Create a second order and cancel it
     resp2 = await async_client.post(
         "/orders/", json=payload, headers={"X-User-Id": user_id}
     )

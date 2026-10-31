@@ -381,7 +381,6 @@ func TestReserve_ThenConfirm_DeductsReservedStock(t *testing.T) {
 		t.Fatalf("expected available=10, reserved=0 after Confirm, got %d/%d", available, reserved)
 	}
 
-	// Confirming an unreserved / non-existent order must fail with ErrCorruptedReservation
 	unreservedCompleteEv := domain.OrderCompletedEvent{
 		EventID:   uuid.New(),
 		EventType: "OrderCompleted",
@@ -433,7 +432,6 @@ func TestReserve_PriceMismatchAndInvalidPrices(t *testing.T) {
 		t.Fatalf("expected ErrProductNotFound, got %v", err)
 	}
 
-	// Verify CleanupProcessedOutboxEvents with batch limit
 	_, _ = pool.Exec(ctx, "UPDATE outbox_events SET processed = TRUE, created_at = NOW() - INTERVAL '10 days'")
 	deleted, err := repo.CleanupProcessedOutboxEvents(ctx, 7*24*time.Hour, 100)
 	if err != nil || deleted == 0 {

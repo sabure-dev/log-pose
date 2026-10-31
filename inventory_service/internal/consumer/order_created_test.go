@@ -240,7 +240,6 @@ func TestOrderConsumer_RetryOrDeadLetter_DelayedRetryAndDLQ(t *testing.T) {
 	}
 	body, _ := json.Marshal(event)
 
-	// Attempt 1: publishes to retryQueueName via default exchange "" with Expiration="2000" and x-retry-count=1
 	mockAck1 := &mockAcknowledger{}
 	mockCh1 := newMockAMQPChannel()
 	c1 := newConsumerWithMockChannel(mockCh1, mockRes)
@@ -272,7 +271,6 @@ func TestOrderConsumer_RetryOrDeadLetter_DelayedRetryAndDLQ(t *testing.T) {
 		t.Errorf("expected x-original-routing-key='order.created', got %v", pub1.msg.Headers["x-original-routing-key"])
 	}
 
-	// Attempt 3 (x-retry-count=2 already): reaches maxDeliveryAttempts (3), sends to DLQ via Nack(requeue=false)
 	mockAck3 := &mockAcknowledger{}
 	mockCh3 := newMockAMQPChannel()
 	c3 := newConsumerWithMockChannel(mockCh3, mockRes)
@@ -350,9 +348,6 @@ func TestOrderConsumer_HandleOrderCompleted_Success(t *testing.T) {
 	}
 }
 
-// TestOrderConsumer_AMQPTopology_RetryAndDLQ_Integration verifies against a live RabbitMQ broker
-// that a transient failure retries through retryQueueName and, after 3 failed attempts,
-// actually lands in inventory_order_events_dlq (even though its routing key changed to mainQueueName).
 func TestOrderConsumer_AMQPTopology_RetryAndDLQ_Integration(t *testing.T) {
 	rmqURL := os.Getenv("TEST_RABBITMQ_URL")
 	if rmqURL == "" {
@@ -371,7 +366,6 @@ func TestOrderConsumer_AMQPTopology_RetryAndDLQ_Integration(t *testing.T) {
 	}
 	defer setupCh.Close()
 
-	// Clean queues before test
 	_, _ = setupCh.QueueDelete(mainQueueName, false, false, false)
 	_, _ = setupCh.QueueDelete(retryQueueName, false, false, false)
 	_, _ = setupCh.QueueDelete(dlqQueueName, false, false, false)
@@ -401,7 +395,6 @@ func TestOrderConsumer_AMQPTopology_RetryAndDLQ_Integration(t *testing.T) {
 		errCh <- c.Run(ctx)
 	}()
 
-	// Wait briefly for consumer topology declaration
 	time.Sleep(150 * time.Millisecond)
 
 	orderID := uuid.New()

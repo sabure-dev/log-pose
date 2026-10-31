@@ -138,7 +138,6 @@ func (s *Server) ListProducts(ctx context.Context, req *pb.ListProductsRequest) 
 	}, nil
 }
 
-// UnaryLoggingInterceptor extracts correlation ID from incoming metadata and logs duration and status.
 func UnaryLoggingInterceptor() grpc.UnaryServerInterceptor {
 	return func(
 		ctx context.Context,
@@ -146,7 +145,6 @@ func UnaryLoggingInterceptor() grpc.UnaryServerInterceptor {
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
 	) (any, error) {
-		// Extract incoming W3C traceparent and start server span
 		ctx = telemetry.ExtractGRPCMetadata(ctx)
 		tracer := telemetry.Tracer("inventory-service")
 		ctx, span := tracer.Start(ctx, info.FullMethod)

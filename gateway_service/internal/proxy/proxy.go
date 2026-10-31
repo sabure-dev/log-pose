@@ -37,13 +37,11 @@ func NewOrdersProxyWithTransport(targetURL string, internalAPIToken string, tran
 
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			// Rewrite URL target and path: /api/v1/orders/* -> /orders/*
 			pr.SetURL(u)
 			pr.Out.URL.Path = strings.TrimPrefix(pr.In.URL.Path, "/api/v1")
 			pr.Out.URL.RawPath = strings.TrimPrefix(pr.In.URL.RawPath, "/api/v1")
 			pr.Out.URL.RawQuery = pr.In.URL.RawQuery
 
-			// 1. Strip ALL incoming client X-* headers to prevent spoofing
 			origCorrID := pr.In.Header.Get("X-Correlation-Id")
 			origReqID := pr.In.Header.Get("X-Request-Id")
 			for name := range pr.In.Header {
@@ -52,7 +50,6 @@ func NewOrdersProxyWithTransport(targetURL string, internalAPIToken string, tran
 				}
 			}
 
-			// Correlation / Request ID propagation
 			corrID := origCorrID
 			if corrID == "" {
 				corrID = origReqID
@@ -63,19 +60,16 @@ func NewOrdersProxyWithTransport(targetURL string, internalAPIToken string, tran
 			pr.Out.Header.Set("X-Correlation-Id", corrID)
 			pr.Out.Header.Set("X-Request-Id", corrID)
 
-			// 2. Inject verified user context from authenticated JWT
 			claims, ok := auth.UserFromContext(pr.In.Context())
 			if ok && claims != nil {
 				pr.Out.Header.Set("X-User-Id", claims.UserID.String())
 				pr.Out.Header.Set("X-User-Role", string(claims.Role))
 
-				// 3. For warehouse operators and admins, inject secret internal API token
 				if claims.Role == auth.RoleWarehouseOperator || claims.Role == auth.RoleAdmin {
 					pr.Out.Header.Set("X-Internal-Token", p.internalAPIToken)
 				}
 			}
 
-			// 4. Inject W3C traceparent into outgoing request to order_service
 			otel.GetTextMapPropagator().Inject(pr.In.Context(), propagation.HeaderCarrier(pr.Out.Header))
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
