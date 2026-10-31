@@ -127,6 +127,14 @@ func TestOrdersProxy_HeaderStrippingAndInjection(t *testing.T) {
 				t.Fatalf("expected X-Custom-Hack stripped, got %s", receivedHeaders.Get("X-Custom-Hack"))
 			}
 
+			// Verify X-Correlation-Id and X-Request-Id were populated
+			if receivedHeaders.Get("X-Correlation-Id") == "" {
+				t.Fatalf("expected X-Correlation-Id to be set")
+			}
+			if receivedHeaders.Get("X-Request-Id") == "" {
+				t.Fatalf("expected X-Request-Id to be set")
+			}
+
 			// Verify verified X-User-Id injected
 			if receivedHeaders.Get("X-User-Id") != testUserID.String() {
 				t.Fatalf("expected X-User-Id %s, got %s", testUserID.String(), receivedHeaders.Get("X-User-Id"))

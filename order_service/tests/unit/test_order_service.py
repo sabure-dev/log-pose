@@ -7,7 +7,7 @@ import pytest
 
 from app.domain import NewOrderItem, OrderEntity, OrderItemEntity
 from app.enums import OrderStatus
-from app.exceptions import IdempotencyConflict, InvalidTransition
+from app.exceptions import IdempotencyConflict, InvalidQuantity, InvalidTransition
 from app.interfaces import (
     AbstractOrderRepository,
     AbstractOutboxRepository,
@@ -328,3 +328,13 @@ async def test_invalid_status_transition_raises_error():
 
     with pytest.raises(InvalidTransition):
         await service.update_order_status(draft_order.id, OrderStatus.RESERVED)
+
+
+async def test_create_new_order_with_empty_items_raises_invalid_quantity():
+    uow = FakeUnitOfWork()
+    service = OrderService(uow=uow)
+    user_id = uuid.uuid4()
+
+    with pytest.raises(InvalidQuantity, match="Order must contain at least one item"):
+        await service.create_new_order(user_id=user_id, items=[])
+

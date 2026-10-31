@@ -76,6 +76,8 @@ class OrderService:
         shipping_address: str | None = None,
         idempotency_key: str | None = None,
     ) -> OrderEntity:
+        if not items:
+            raise InvalidQuantity("Order must contain at least one item")
         normalized_key = _normalize_idempotency_key(idempotency_key)
         total_amount = sum(
             (item.price * item.quantity for item in items), Decimal("0.00")

@@ -10,9 +10,11 @@ import (
 
 	"gateway_service/internal/inventory"
 	pb "gateway_service/internal/pb/inventoryv1"
+	"gateway_service/internal/telemetry"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -175,5 +177,26 @@ func TestInventoryHandler_GetProductStock(t *testing.T) {
 	h.GetProductStock(wNotFound, reqNotFound)
 	if wNotFound.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", wNotFound.Code)
+	}
+}
+
+func TestInventoryClient_CorrelationIDMetadataPropagation(t *testing.T) {
+	var capturedMD metadata.MD
+	mockSvc := &mockGRPCInventoryService{
+		listProductsFn: func(ctx context.Context, req *pb.ListProductsRequest) (*pb.ListProductsResponse, error) {
+			if md, ok := metadata.FromOutgoingContext(ctx); ok {
+				capturedMD = md
+			}
+			return &pb.ListProductsResponse{}, nil
+		},
+	}
+	client := inventory.NewClientWithService(mockSvc)
+	ctx := telemetry.ContextWithCorrelationID(context.Background(), "test-corr-id-999")
+	_, err := client.ListProducts(ctx, 10, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if vals := capturedMD.Get("x-correlation-id"); len(vals) == 0 || vals[0] != "test-corr-id-999" {
+		t.Fatalf("expected x-correlation-id in gRPC metadata, got %v", vals)
 	}
 }

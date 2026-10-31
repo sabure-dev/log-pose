@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import signal
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
@@ -89,6 +90,15 @@ async def process_outbox_batch(
                     if isinstance(event.payload, dict)
                     else ""
                 )
+                if not traceparent and corr_id:
+                    clean_corr = corr_id.replace("-", "").lower()
+                    if (
+                        len(clean_corr) == 32
+                        and all(c in "0123456789abcdef" for c in clean_corr)
+                        and clean_corr != "0" * 32
+                    ):
+                        span_id = f"{uuid.uuid4().int & 0xFFFFFFFFFFFFFFFF:016x}"
+                        traceparent = f"00-{clean_corr}-{span_id}-01"
                 headers = {}
                 if traceparent:
                     headers["traceparent"] = traceparent

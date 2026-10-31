@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 
 	"gateway_service/internal/auth"
+	"github.com/google/uuid"
 )
 
 type OrdersProxy struct {
@@ -43,11 +44,24 @@ func NewOrdersProxyWithTransport(targetURL string, internalAPIToken string, tran
 			pr.Out.URL.RawQuery = pr.In.URL.RawQuery
 
 			// 1. Strip ALL incoming client X-* headers to prevent spoofing
+			origCorrID := pr.In.Header.Get("X-Correlation-Id")
+			origReqID := pr.In.Header.Get("X-Request-Id")
 			for name := range pr.In.Header {
 				if strings.HasPrefix(strings.ToLower(name), "x-") {
 					pr.Out.Header.Del(name)
 				}
 			}
+
+			// Correlation / Request ID propagation
+			corrID := origCorrID
+			if corrID == "" {
+				corrID = origReqID
+			}
+			if corrID == "" {
+				corrID = uuid.New().String()
+			}
+			pr.Out.Header.Set("X-Correlation-Id", corrID)
+			pr.Out.Header.Set("X-Request-Id", corrID)
 
 			// 2. Inject verified user context from authenticated JWT
 			claims, ok := auth.UserFromContext(pr.In.Context())

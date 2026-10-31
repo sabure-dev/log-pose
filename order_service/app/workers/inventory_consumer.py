@@ -16,6 +16,8 @@ from app.logging import correlation_id_ctx, setup_logging
 from app.repositories.uow import SqlAlchemyUnitOfWork
 from app.schemas import InventoryResultPayload
 from app.services.order import OrderService
+from app.telemetry import extract_traceparent
+from opentelemetry import trace
 
 logger = logging.getLogger(__name__)
 
@@ -109,32 +111,52 @@ async def handle_inventory_message(
         await message.reject(requeue=False)
         return
 
-    correlation_id = parsed.correlation_id or ""
+    headers = getattr(message, "headers", None) or {}
+    correlation_id = (
+        parsed.correlation_id
+        or headers.get("x-correlation-id")
+        or ""
+    )
     token = correlation_id_ctx.set(correlation_id)
 
+    traceparent = headers.get("traceparent") or parsed.traceparent
+    carrier = {}
+    if traceparent:
+        carrier["traceparent"] = str(traceparent)
+    extracted_ctx = extract_traceparent(carrier)
+    tracer = trace.get_tracer("order_service.inventory_consumer")
+
     try:
-        target_status = (
-            OrderStatus.RESERVED
-            if parsed.status == "RESERVED"
-            else OrderStatus.CANCELLED
-        )
+        with tracer.start_as_current_span(
+            "inventory_consumer.handle_inventory_message", context=extracted_ctx
+        ) as span:
+            span.set_attribute("order_id", str(parsed.order_id))
+            span.set_attribute("status", parsed.status)
+            if correlation_id:
+                span.set_attribute("correlation_id", correlation_id)
 
-        try:
-            async with session_factory() as session:
-                uow = SqlAlchemyUnitOfWork(session=session)
-                service = OrderService(uow=uow)
-                try:
-                    await service.update_order_status(
-                        parsed.order_id, target_status, reason=parsed.reason
-                    )
-                except DomainError as domain_err:
-                    logger.warning(f"Domain transition rejected: {domain_err}")
-        except Exception as db_err:
-            logger.error(f"Database error in inventory consumer: {db_err}")
-            await _retry_or_dead_letter(message, channel, str(parsed.order_id), db_err)
-            return
+            target_status = (
+                OrderStatus.RESERVED
+                if parsed.status == "RESERVED"
+                else OrderStatus.CANCELLED
+            )
 
-        await message.ack()
+            try:
+                async with session_factory() as session:
+                    uow = SqlAlchemyUnitOfWork(session=session)
+                    service = OrderService(uow=uow)
+                    try:
+                        await service.update_order_status(
+                            parsed.order_id, target_status, reason=parsed.reason
+                        )
+                    except DomainError as domain_err:
+                        logger.warning(f"Domain transition rejected: {domain_err}")
+            except Exception as db_err:
+                logger.error(f"Database error in inventory consumer: {db_err}")
+                await _retry_or_dead_letter(message, channel, str(parsed.order_id), db_err)
+                return
+
+            await message.ack()
     finally:
         correlation_id_ctx.reset(token)
 
