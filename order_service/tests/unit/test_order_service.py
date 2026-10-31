@@ -337,4 +337,3 @@ async def test_create_new_order_with_empty_items_raises_invalid_quantity():
 
     with pytest.raises(InvalidQuantity, match="Order must contain at least one item"):
         await service.create_new_order(user_id=user_id, items=[])
-

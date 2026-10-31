@@ -6,6 +6,7 @@ import signal
 
 import aio_pika
 from aio_pika.abc import AbstractChannel, AbstractIncomingMessage
+from opentelemetry import trace
 from pydantic import ValidationError
 
 from app.config import settings
@@ -17,7 +18,6 @@ from app.repositories.uow import SqlAlchemyUnitOfWork
 from app.schemas import InventoryResultPayload
 from app.services.order import OrderService
 from app.telemetry import extract_traceparent
-from opentelemetry import trace
 
 logger = logging.getLogger(__name__)
 
@@ -112,11 +112,7 @@ async def handle_inventory_message(
         return
 
     headers = getattr(message, "headers", None) or {}
-    correlation_id = (
-        parsed.correlation_id
-        or headers.get("x-correlation-id")
-        or ""
-    )
+    correlation_id = parsed.correlation_id or headers.get("x-correlation-id") or ""
     token = correlation_id_ctx.set(correlation_id)
 
     traceparent = headers.get("traceparent") or parsed.traceparent
@@ -153,7 +149,9 @@ async def handle_inventory_message(
                         logger.warning(f"Domain transition rejected: {domain_err}")
             except Exception as db_err:
                 logger.error(f"Database error in inventory consumer: {db_err}")
-                await _retry_or_dead_letter(message, channel, str(parsed.order_id), db_err)
+                await _retry_or_dead_letter(
+                    message, channel, str(parsed.order_id), db_err
+                )
                 return
 
             await message.ack()
