@@ -163,7 +163,6 @@ func TestInventoryHandler_GetProductStock(t *testing.T) {
 	client := inventory.NewClientWithService(mockSvc)
 	h := inventory.NewHandler(client)
 
-	// Found
 	reqFound := httptest.NewRequest(http.MethodGet, "/api/v1/inventory/products/"+prodID, nil)
 	wFound := httptest.NewRecorder()
 	h.GetProductStock(wFound, reqFound)
@@ -171,7 +170,6 @@ func TestInventoryHandler_GetProductStock(t *testing.T) {
 		t.Fatalf("expected 200, got %d", wFound.Code)
 	}
 
-	// Not Found
 	reqNotFound := httptest.NewRequest(http.MethodGet, "/api/v1/inventory/products/"+uuid.New().String(), nil)
 	wNotFound := httptest.NewRecorder()
 	h.GetProductStock(wNotFound, reqNotFound)

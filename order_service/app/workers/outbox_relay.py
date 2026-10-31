@@ -60,7 +60,6 @@ async def claim_unprocessed_events(
     for event in events:
         event.next_retry_at = lease_until
 
-    # Commit the short lease immediately so row locks are NOT held during network I/O.
     await session.commit()
     return events
 

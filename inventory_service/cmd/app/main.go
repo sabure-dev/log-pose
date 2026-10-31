@@ -46,7 +46,6 @@ func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// Initialize OpenTelemetry tracer
 	shutdownTracer, err := telemetry.InitTracer(ctx, "inventory-service", cfg.OTLPEndpoint)
 	if err != nil {
 		slog.Warn("Failed to initialize OpenTelemetry", "error", err)

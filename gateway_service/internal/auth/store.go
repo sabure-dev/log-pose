@@ -26,7 +26,6 @@ func NewMemoryUserStore() *MemoryUserStore {
 		usersByID:   make(map[uuid.UUID]*User),
 		usersByName: make(map[string]*User),
 	}
-	// Seed demo accounts for quick testing and smoke tests
 	_, _ = store.CreateUser(context.Background(), "demo_customer", "demo_password", RoleCustomer)
 	_, _ = store.CreateUser(context.Background(), "demo_operator", "demo_password", RoleWarehouseOperator)
 	_, _ = store.CreateUser(context.Background(), "demo_admin", "demo_password", RoleAdmin)

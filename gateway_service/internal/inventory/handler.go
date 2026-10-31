@@ -162,7 +162,6 @@ func (h *Handler) GetProductStock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract product ID from path, e.g. /api/v1/inventory/products/{id}
 	id := strings.TrimPrefix(r.URL.Path, "/api/v1/inventory/products/")
 	id = strings.TrimSpace(id)
 	if id == "" {

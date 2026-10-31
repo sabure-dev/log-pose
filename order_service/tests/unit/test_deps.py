@@ -8,7 +8,6 @@ from app.config import settings
 def test_safe_compare_digest_with_ascii_and_unicode():
     assert _safe_compare_digest("valid-secret", "valid-secret") is True
     assert _safe_compare_digest("wrong-secret", "valid-secret") is False
-    # Non-ASCII Unicode strings must not raise TypeError
     assert _safe_compare_digest("invalid_töken_ñ_123", "valid-secret") is False
     assert _safe_compare_digest("valid-secret", "invalid_töken_ñ_123") is False
 

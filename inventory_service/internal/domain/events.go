@@ -49,5 +49,4 @@ type InventoryReservationResultEvent struct {
 	Reason        string    `json:"reason,omitempty"`
 }
 
-// InventoryReservedEvent is kept as a type alias for backward compatibility.
 type InventoryReservedEvent = InventoryReservationResultEvent

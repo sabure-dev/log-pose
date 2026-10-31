@@ -74,7 +74,6 @@ func InitTracer(ctx context.Context, serviceName, endpoint string) (func(context
 	return tp.Shutdown, nil
 }
 
-// ExtractGRPCMetadata extracts W3C traceparent context from incoming gRPC metadata.
 func ExtractGRPCMetadata(ctx context.Context) context.Context {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
@@ -108,7 +107,6 @@ func (m metadataCarrier) Keys() []string {
 	return keys
 }
 
-// ExtractAMQPHeaders extracts traceparent from RabbitMQ message delivery headers.
 func ExtractAMQPHeaders(ctx context.Context, headers amqp.Table) context.Context {
 	if headers == nil {
 		return ctx
@@ -117,7 +115,6 @@ func ExtractAMQPHeaders(ctx context.Context, headers amqp.Table) context.Context
 	return otel.GetTextMapPropagator().Extract(ctx, carrier)
 }
 
-// InjectAMQPHeaders injects traceparent into RabbitMQ message headers.
 func InjectAMQPHeaders(ctx context.Context, headers amqp.Table) amqp.Table {
 	if headers == nil {
 		headers = make(amqp.Table)
@@ -163,7 +160,6 @@ func Tracer(name string) trace.Tracer {
 	return otel.GetTracerProvider().Tracer(name)
 }
 
-// GetTraceparent returns a W3C traceparent string if the context has a valid span.
 func GetTraceparent(ctx context.Context) string {
 	spanCtx := trace.SpanFromContext(ctx).SpanContext()
 	if !spanCtx.IsValid() {

@@ -157,8 +157,6 @@ type eventRecord struct {
 	attempts int
 }
 
-// claimBatch atomically claims up to outboxBatchSize events with a short lease on next_retry_at
-// and immediately commits the transaction so no DB locks are held during network I/O.
 func (r *OutboxRelay) claimBatch(ctx context.Context) ([]eventRecord, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -263,7 +261,6 @@ func (r *OutboxRelay) ProcessBatch(ctx context.Context) error {
 	return batchErr
 }
 
-// CountParkedEvents returns the number of unprocessed outbox events that have reached maximum attempts.
 func (r *OutboxRelay) CountParkedEvents(ctx context.Context) (int64, error) {
 	var count int64
 	err := r.pool.QueryRow(ctx, `
@@ -277,7 +274,6 @@ func (r *OutboxRelay) CountParkedEvents(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
-// RequeueParkedEvents resets attempts and next_retry_at for parked events so they can be retried after recovery.
 func (r *OutboxRelay) RequeueParkedEvents(ctx context.Context) (int64, error) {
 	cmdTag, err := r.pool.Exec(ctx, `
 		UPDATE outbox_events
@@ -292,7 +288,6 @@ func (r *OutboxRelay) RequeueParkedEvents(ctx context.Context) (int64, error) {
 	return cmdTag.RowsAffected(), nil
 }
 
-// CleanupProcessedEvents deletes processed outbox events older than retention in bounded batches.
 func (r *OutboxRelay) CleanupProcessedEvents(ctx context.Context, retention time.Duration, batchLimit int) (int64, error) {
 	if batchLimit <= 0 {
 		batchLimit = cleanupBatchLimit

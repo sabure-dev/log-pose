@@ -74,12 +74,10 @@ func InitTracer(ctx context.Context, serviceName, endpoint string) (func(context
 
 type correlationIDKey struct{}
 
-// ContextWithCorrelationID attaches a correlation ID to context.
 func ContextWithCorrelationID(ctx context.Context, correlationID string) context.Context {
 	return context.WithValue(ctx, correlationIDKey{}, correlationID)
 }
 
-// CorrelationIDFromContext retrieves correlation ID from context.
 func CorrelationIDFromContext(ctx context.Context) string {
 	if val, ok := ctx.Value(correlationIDKey{}).(string); ok {
 		return val
@@ -87,7 +85,6 @@ func CorrelationIDFromContext(ctx context.Context) string {
 	return ""
 }
 
-// InjectGRPCMetadata injects traceparent and other W3C context into outgoing gRPC metadata.
 func InjectGRPCMetadata(ctx context.Context) context.Context {
 	md, ok := metadata.FromOutgoingContext(ctx)
 	if !ok {
@@ -101,7 +98,6 @@ func InjectGRPCMetadata(ctx context.Context) context.Context {
 	return metadata.NewOutgoingContext(ctx, carrier.md)
 }
 
-// ExtractGRPCMetadata extracts traceparent and other W3C context from incoming gRPC metadata.
 func ExtractGRPCMetadata(ctx context.Context) context.Context {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {

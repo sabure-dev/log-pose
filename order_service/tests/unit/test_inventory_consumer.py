@@ -144,7 +144,6 @@ async def test_handle_inventory_db_error_retries_and_dead_letters():
         "status": "RESERVED",
     }
 
-    # Attempt 1 -> published to retry queue and acked
     msg1 = DummyMessage(
         body=json.dumps(payload).encode("utf-8"),
         routing_key="inventory.reserved",
@@ -157,7 +156,6 @@ async def test_handle_inventory_db_error_retries_and_dead_letters():
         ch1.default_exchange.publish.call_args.kwargs["routing_key"] == RETRY_QUEUE_NAME
     )
 
-    # Attempt 3 (x-retry-count=2) -> rejected without requeue (sent to DLQ)
     msg3 = DummyMessage(
         body=json.dumps(payload).encode("utf-8"),
         routing_key="inventory.reserved",

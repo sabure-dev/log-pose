@@ -83,17 +83,12 @@ func (c *OrderConsumer) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to declare dlq: %w", err)
 	}
 
-	// Bind DLQ to:
-	// - dlqQueueName ("inventory_order_events_dlq")
-	// - mainQueueName ("inventory_order_events_queue"): messages returning from retryQueueName have routing key = mainQueueName
-	// - "order.#": messages rejected on their initial delivery before entering retryQueueName
 	for _, dlqKey := range []string{dlqQueueName, mainQueueName, "order.#"} {
 		if err := c.ch.QueueBind(dlq.Name, dlqKey, "logpose_dlx", false, nil); err != nil {
 			return fmt.Errorf("failed to bind dlq to %s: %w", dlqKey, err)
 		}
 	}
 
-	// Declare delay/retry queue that routes expired messages back to mainQueueName via default exchange.
 	_, err = c.ch.QueueDeclare(
 		retryQueueName,
 		true,
@@ -314,7 +309,6 @@ func (c *OrderConsumer) retryOrDeadLetter(ctx context.Context, d amqp.Delivery, 
 
 	headers := amqp.Table{}
 	for k, v := range d.Headers {
-		// Do not forward any death-related headers into retryQueueName to prevent RabbitMQ cycle detection from dropping retried messages.
 		if strings.Contains(k, "death") {
 			continue
 		}
@@ -323,12 +317,9 @@ func (c *OrderConsumer) retryOrDeadLetter(ctx context.Context, d amqp.Delivery, 
 	headers["x-retry-count"] = int32(attempts)
 	headers["x-original-routing-key"] = effectiveRoutingKey(d)
 
-	// Use an independent context for retry publication so it does not inherit an exhausted database context timeout.
 	retryCtx, retryCancel := context.WithTimeout(context.WithoutCancel(ctx), retryConfirmTimeout)
 	defer retryCancel()
 
-	// Publish to retryQueueName via default exchange ("") with uniform TTL to avoid FIFO head-of-line blocking,
-	// and wait for broker publisher confirm before acknowledging the original delivery.
 	dc, pubErr := c.publishRetry(
 		retryCtx,
 		"",

@@ -163,7 +163,6 @@ func TestOutboxRelay_ParksEventAfterMaxAttemptsAndRequeues(t *testing.T) {
 		t.Fatalf("expected 1 parked event from CountParkedEvents, got %d (err=%v)", parkedCount, err)
 	}
 
-	// Next ProcessBatch should skip the parked event completely
 	called := false
 	relay2 := workers.NewOutboxRelayWithPublisher(pool, func(ctx context.Context, exchange, key string, mandatory, immediate bool, msg amqp.Publishing) (workers.DeferredConfirmation, error) {
 		called = true
@@ -177,7 +176,6 @@ func TestOutboxRelay_ParksEventAfterMaxAttemptsAndRequeues(t *testing.T) {
 		t.Fatalf("expected parked event not to be republished")
 	}
 
-	// RequeueParkedEvents should unpark the event and allow it to be processed
 	requeued, err := relay2.RequeueParkedEvents(ctx)
 	if err != nil || requeued != 1 {
 		t.Fatalf("expected 1 requeued event, got %d (err=%v)", requeued, err)
